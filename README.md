@@ -1,63 +1,55 @@
 # UnBlock
 
-UnBlock is a lightweight, zero-dependency Windows utility designed to instantly identify and terminate processes holding active locks on files or directories, preventing you from moving, renaming, or deleting them.
+UnBlock is a fast, lightweight Windows tool that helps you deal with "File in Use" errors. It lets you right-click any locked file or folder and instantly close the background programs that are stopping you from moving, renaming, or deleting it.
 
-Unlike heavy, opaque utilities, UnBlock compiles locally on your machine during installation—ensuring 100% security transparency with zero malware risk.
-
----
-
-## Key Features
-
-* **Instant Folder Scanning**: Bypasses slow, disk-heavy directory traversal by directly querying active system processes executing out of the target folder.
-* **Direct File Handle Resolution**: Leverages the native Windows Restart Manager API to pinpoint the exact application holding the lock.
-* **Real-Time Handle Refresh**: Automatically detects when the operating system releases a file handle after process termination and updates the UI instantly.
-* **Shell Integration**: Adds seamless, native right-click context menu options ("UnBlock File" and "UnBlock Folder") to Windows Explorer.
-* **Zero Dependencies**: Pure, native Windows architecture with no external runtimes, wrappers, or bloat.
+Unlike many other utilities, UnBlock is completely transparent. It builds itself locally on your computer during installation, ensuring there are no hidden trackers, malware, or bloated software.
 
 ---
 
-## Security & Trust Transparency
+## Why Use UnBlock?
 
-Because file-unlocking utilities require administrative access, UnBlock prioritizes complete open-source transparency:
-* **No Pre-compiled Binaries**: The installation script builds the executable directly on your machine from the provided source code.
-* **Local Compilation**: Eliminates the risk of downloading modified, malicious, or packaged `.exe` files.
-* **Inspectable Source**: Every line of code can be reviewed prior to installation.
+* **Fast and Accurate:** It instantly scans and finds the exact program holding onto your file or folder.
+* **Simple Right-Click Menu:** It adds native "UnBlock" options directly to your normal Windows right-click menu.
+* **100% Safe and Transparent:** To guarantee your security, we do not provide pre-packaged `.exe` files. The installer securely compiles the program on your own computer from the provided, easily readable source code. 
+* **No Clutter:** It runs only when you click it. There are no background services draining your battery or CPU.
 
 ---
 
-## Installation & Setup
+## Installation
 
-1. Clone or download this repository to your local machine.
-2. Right-click `install.bat` and select **Run as administrator**.
-3. Choose your desired installation directory via the folder picker (e.g., `C:\Program Files\UnBlock`).
-4. The script will automatically compile the native executable (`UnBlock.exe`), register the Windows Explorer context menu extensions, and run a rapid background warmup.
+1. Download the latest UnBlock `.zip` file from the Releases page.
+2. **Extract** the downloaded `.zip` file to a regular folder on your computer. (Do not run the files directly from inside the `.zip`).
+3. Open the extracted folder and double-click **`install.bat`**. 
+   *(Note: Windows will ask for Administrator permission so it can add the right-click menu options and build the tool).*
+4. A prompt will appear asking where you want to install it. You can choose a folder or just click OK to use the default location (`C:\Program Files\UnBlock`).
 
 ---
 
 ## How to Use
 
-1. Navigate to the locked file or folder in Windows Explorer.
-2. Right-click the target resource and select your action:
-   * **UnBlock File**: For individual locked files.
-   * **UnBlock Folder**: When right-clicking a directory.
-   * **UnBlock This Folder**: When right-clicking inside empty space within a directory.
-3. The UnBlock management window will display all locking processes:
-   * **Terminate Process**: Closes the specific selected process.
-   * **Terminate All**: Force-closes all identified locking handles simultaneously.
-   * **Close**: Safely exits the utility.
+Once installed, simply navigate to the file or folder that is stuck.
 
-*Note: If a targeted process requires elevated system privileges to terminate, UnBlock will automatically prompt to restart itself with Administrator permissions.*
+1. Right-click the item and choose your action:
+   * **UnBlock File**: Use this when right-clicking a single file.
+   * **UnBlock Folder**: Use this when right-clicking a folder.
+   * **UnBlock This Folder**: Use this when right-clicking the empty white space inside an open folder.
+2. A window will pop up showing the exact programs locking your files.
+3. Select a program from the list and click **Terminate Process**, or click **Terminate All** to close them all at once.
+
+*Note: If a stubborn program requires higher system permissions to close, UnBlock will ask to restart itself as an Administrator to finish the job.*
 
 ---
 
-## Uninstallation
+## How to Uninstall
 
-1. Navigate to your installation folder (Default: `C:\Program Files\UnBlock`).
-2. Right-click `uninstall.bat` and select **Run as administrator**.
-3. The uninstaller will cleanly scrub all registered Windows Explorer context menu entries and delete the application folder.
+UnBlock leaves no mess behind. If you want to remove it:
+
+1. Go to the folder where you installed UnBlock (the default is `C:\Program Files\UnBlock`).
+2. Double-click **`uninstall.bat`**.
+3. It will instantly remove the right-click menu options, clean up the registry, and delete the application folder.
 
 ---
 
 ## License
 
-This project is open-source and available under the [MIT License](LICENSE).
+This project is completely free, open-source, and available under the MIT License.
