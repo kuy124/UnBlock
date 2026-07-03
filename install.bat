@@ -305,7 +305,7 @@ public class UnlockerForm : Form {
         }
     }
 
-    // --- Core Multi-Tier Scan Logic ---
+    // --- Redesigned Fast Path Scan Logic ---
     private List<ProcessItem> Run3TierScan(string path, bool forceRefresh, Action<int> progressCallback) {
         var finalLockingProcesses = new List<ProcessItem>();
         var addedPids = new HashSet<int>();
@@ -314,12 +314,20 @@ public class UnlockerForm : Form {
         RefreshProcessSnapshot(forceRefresh);
 
         if (Directory.Exists(path)) {
-            // 1. FAST PROCESS MATCH PATH: Instantly identify any process executing inside this directory tree
+            progressCallback(50);
+
+            // Normalize folder path to prevent subset matches (e.g. matching C:\Folder2 when scanning C:\Folder)
+            string normalizedPath = path;
+            if (!normalizedPath.EndsWith(Path.DirectorySeparatorChar.ToString()) && !normalizedPath.EndsWith(Path.AltDirectorySeparatorChar.ToString())) {
+                normalizedPath += Path.DirectorySeparatorChar;
+            }
+
+            // Instantly identify running processes executing from inside this directory tree
             lock (CacheLock) {
                 foreach (KeyValuePair<int, string> kvp in ProcessPathMap) {
                     int pid = kvp.Key;
                     string procPath = kvp.Value;
-                    if (procPath != null && procPath.StartsWith(path, StringComparison.OrdinalIgnoreCase)) {
+                    if (procPath != null && (procPath.StartsWith(normalizedPath, StringComparison.OrdinalIgnoreCase) || procPath.Equals(path, StringComparison.OrdinalIgnoreCase))) {
                         if (addedPids.Add(pid)) {
                             finalLockingProcesses.Add(new ProcessItem {
                                 Pid = pid,
@@ -330,68 +338,10 @@ public class UnlockerForm : Form {
                     }
                 }
             }
-
-            progressCallback(20);
-
-            // 2. FAST SINGLE-PASS DIRECTORY CRAWLING
-            // Enumerate files up to 50,000 using high-performance EnumerateFileSystemInfos (single metadata query per directory)
-            var files = new List<string>();
-            var dirQueue = new Queue<string>();
-            dirQueue.Enqueue(path);
-
-            try {
-                while (dirQueue.Count > 0 && files.Count < 50000) {
-                    string currentDir = dirQueue.Dequeue();
-                    try {
-                        DirectoryInfo di = new DirectoryInfo(currentDir);
-                        foreach (FileSystemInfo info in di.EnumerateFileSystemInfos()) {
-                            if ((info.Attributes & FileAttributes.Directory) == FileAttributes.Directory) {
-                                dirQueue.Enqueue(info.FullName);
-                            } else {
-                                files.Add(info.FullName);
-                                if (files.Count >= 50000) break;
-                            }
-                        }
-                    } catch {
-                        // Ignore permission-restricted directories gracefully
-                    }
-                }
-            } catch {}
-
-            progressCallback(40);
-
-            if (files.Count == 0) {
-                progressCallback(100);
-                return finalLockingProcesses;
-            }
-
-            // 3. HIGH-SPEED BATCH RESTART MANAGER RESOLUTION
-            // No disk-thrashing FileStream.Open calls. We pass batches directly to Restart Manager.
-            int batchSize = 1000;
-            int totalBatches = (int)Math.Ceiling((double)files.Count / batchSize);
-
-            for (int i = 0; i < files.Count; i += batchSize) {
-                int size = Math.Min(batchSize, files.Count - i);
-                string[] chunk = new string[size];
-                files.CopyTo(i, chunk, 0, size);
-
-                var pids = GetProcessesLockingFiles(chunk);
-                foreach (int pid in pids) {
-                    if (addedPids.Add(pid)) {
-                        finalLockingProcesses.Add(new ProcessItem {
-                            Pid = pid,
-                            Name = GetProcessName(pid),
-                            Path = GetProcessPath(pid) ?? "Unknown (Protected/Elevated)"
-                        });
-                    }
-                }
-
-                int currentBatch = (i / batchSize) + 1;
-                int percent = 40 + (int)(((double)currentBatch / totalBatches) * 60);
-                progressCallback(percent);
-            }
+            progressCallback(100);
         } else if (File.Exists(path)) {
-            progressCallback(30);
+            progressCallback(50);
+            // Single files are evaluated via Restart Manager directly (instant)
             var pids = GetProcessesLockingFiles(new string[] { path });
             foreach (int pid in pids) {
                 if (addedPids.Add(pid)) {
