@@ -44,8 +44,6 @@ if (-not (Test-Path $InstallDir)) {
 
 # Compile the C# file dynamically from the source directory, and save the .exe into the installation directory
 try {
-    # FIX: We removed "-Language CSharp" because PowerShell automatically infers the language from the .cs file extension when using "-Path". 
-    # Using both "-Path" and "-Language" together is what caused the parameter set conflict!
     Add-Type -Path $SourceCsPath -OutputAssembly $ExePath -OutputType WindowsApplication -ReferencedAssemblies "System.Windows.Forms.dll", "System.Drawing.dll", "System.dll", "System.Core.dll" -ErrorAction Stop
 } catch {
     $errMsg = $_.Exception.Message
@@ -57,7 +55,8 @@ try {
 Start-Process -FilePath $ExePath -ArgumentList "[WARMUP]" -WindowStyle Hidden -Wait
 
 # Write Uninstaller script to the install directory
-$UninstallerCode = @'
+# Using a double-quoted string here so $InstallDir is strictly resolved during installation!
+$UninstallerCode = @"
 @echo off
 net session >nul 2>&1
 if %errorLevel% neq 0 (
@@ -65,16 +64,20 @@ if %errorLevel% neq 0 (
     exit /b
 )
 echo Removing Registry Keys...
-reg delete "HKLM\SOFTWARE\Classes\*\shell\UnBlock" /f >nul 2>&1
-reg delete "HKLM\SOFTWARE\Classes\Directory\shell\UnBlock" /f >nul 2>&1
-reg delete "HKLM\SOFTWARE\Classes\Directory\Background\shell\UnBlock" /f >nul 2>&1
+echo --- UnBlock Uninstall Log --- > "$InstallDir\uninstall_log.txt"
+
+reg delete "HKLM\SOFTWARE\Classes\*\shell\UnBlock" /f >> "$InstallDir\uninstall_log.txt" 2>&1
+reg delete "HKLM\SOFTWARE\Classes\Directory\shell\UnBlock" /f >> "$InstallDir\uninstall_log.txt" 2>&1
+reg delete "HKLM\SOFTWARE\Classes\Directory\Background\shell\UnBlock" /f >> "$InstallDir\uninstall_log.txt" 2>&1
 
 echo Registry keys removed successfully.
 powershell -NoProfile -Command "Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.MessageBox]::Show('UnBlock has been successfully uninstalled.', 'Uninstalled', 'OK', 'Information')"
 
-start /b cmd /c "timeout /t 2 >nul & rmdir /s /q "%~dp0""
+:: Powershell executes the final cleanup via cmd without locking the directory
+powershell -NoProfile -WindowStyle Hidden -Command "Start-Process -FilePath 'cmd.exe' -ArgumentList '/c timeout /t 2 >nul & rmdir /s /q `"$InstallDir`"' -WindowStyle Hidden"
 exit /b
-'@
+"@
+
 Set-Content -Path $UninstallerPath -Value $UninstallerCode -Encoding UTF8 -Force
 
 # =========================================================================

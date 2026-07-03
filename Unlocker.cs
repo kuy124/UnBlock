@@ -3,6 +3,7 @@ using System.IO;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.Security.Principal;
 using System.Windows.Forms;
 using System.Drawing;
 using System.Threading.Tasks;
@@ -16,7 +17,12 @@ public class UnlockerForm : Form {
     private Button btnClose;
     private Label lblTarget;
     private Label lblTitle;
+    private Label lblAdminState;
     private ProgressBar progressBar;
+    
+    // State tracking
+    private bool isAdmin;
+    private string logFile;
 
     // --- Win32 Native API Declarations ---
     [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Auto)]
@@ -102,7 +108,6 @@ public class UnlockerForm : Form {
     [DllImport("rstrtmgr.dll")]
     private static extern int RmGetList(uint dwSessionHandle, out uint pnProcInfoNeeded, ref uint pnProcInfo, [In, Out] RM_PROCESS_INFO[] rgAffectedApps, ref uint lpdwRebootReasons);
 
-    // --- Caching Mappings ---
     private static readonly Dictionary<int, string> ProcessPathMap = new Dictionary<int, string>();
     private static readonly Dictionary<int, string> ProcessNameMap = new Dictionary<int, string>();
     private static DateTime lastSnapshotTime = DateTime.MinValue;
@@ -111,8 +116,30 @@ public class UnlockerForm : Form {
 
     public UnlockerForm(string path) {
         this.targetPath = path.TrimEnd('"');
+        
+        // Setup Privilege Tracking & Logging
+        WindowsIdentity id = WindowsIdentity.GetCurrent();
+        WindowsPrincipal principal = new WindowsPrincipal(id);
+        isAdmin = principal.IsInRole(WindowsBuiltInRole.Administrator);
+
+        string appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+        string logDir = Path.Combine(appData, "UnBlock");
+        Directory.CreateDirectory(logDir);
+        logFile = Path.Combine(logDir, "UnBlock.log");
+
+        Log("======================================");
+        Log("UnBlock Started");
+        Log("Target: " + targetPath);
+        Log("Running as Administrator: " + isAdmin);
+
         InitializeComponent();
         StartAsyncScan(false);
+    }
+
+    private void Log(string message) {
+        try {
+            File.AppendAllText(logFile, DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + " - " + message + Environment.NewLine);
+        } catch { } // Failsafe if log is locked
     }
 
     private void InitializeComponent() {
@@ -127,19 +154,27 @@ public class UnlockerForm : Form {
         lblTarget = new Label() {
             Text = "Target: " + targetPath,
             Location = new Point(20, 15),
-            Size = new Size(500, 35),
+            Size = new Size(300, 35),
             Font = new Font("Segoe UI", 9, FontStyle.Regular),
             ForeColor = Color.DimGray
         };
 
+        lblAdminState = new Label() {
+            Text = isAdmin ? "Administrator" : "Standard User",
+            Location = new Point(320, 15),
+            Size = new Size(195, 20),
+            Font = new Font("Segoe UI", 8, FontStyle.Bold),
+            ForeColor = isAdmin ? Color.Green : Color.DarkOrange,
+            TextAlign = ContentAlignment.TopRight
+        };
+
         lblTitle = new Label() {
             Text = "Scanning Resource Locks...",
-            Location = Point.Empty,
+            Location = new Point(20, 50),
             Size = new Size(500, 20),
             Font = new Font("Segoe UI", 11, FontStyle.Bold),
             ForeColor = Color.FromArgb(51, 51, 51)
         };
-        lblTitle.Location = new Point(20, 50);
 
         progressBar = new ProgressBar() {
             Location = new Point(20, 75),
@@ -202,6 +237,7 @@ public class UnlockerForm : Form {
         btnClose.Click += delegate { this.Close(); };
 
         this.Controls.Add(lblTarget);
+        this.Controls.Add(lblAdminState);
         this.Controls.Add(lblTitle);
         this.Controls.Add(progressBar);
         this.Controls.Add(listView);
@@ -231,6 +267,7 @@ public class UnlockerForm : Form {
 
         Task.Factory.StartNew(delegate {
             try {
+                Log("Initiating Scan...");
                 List<ProcessItem> results = Run3TierScan(targetPath, forceRefresh, delegate(int val) {
                     this.BeginInvoke(new MethodInvoker(delegate {
                         progressBar.Value = val;
@@ -243,6 +280,7 @@ public class UnlockerForm : Form {
                     PopulateListView(results);
                 }));
             } catch (Exception ex) {
+                Log("Scan error: " + ex.Message);
                 this.BeginInvoke(new MethodInvoker(delegate {
                     progressBar.Visible = false;
                     MessageBox.Show("Scan error: " + ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
@@ -259,6 +297,7 @@ public class UnlockerForm : Form {
             listView.Items.Add(lvi);
         }
 
+        Log("Populated UI with " + items.Count + " locking processes.");
         if (listView.Items.Count == 0) {
             ListViewItem emptyItem = new ListViewItem(new string[] { "N/A", "N/A", "No locking processes found." });
             listView.Items.Add(emptyItem);
@@ -273,18 +312,26 @@ public class UnlockerForm : Form {
         var finalLockingProcesses = new List<ProcessItem>();
         var addedPids = new HashSet<int>();
 
+        progressCallback(10);
         RefreshProcessSnapshot(forceRefresh);
+        progressCallback(40);
 
         if (Directory.Exists(path)) {
-            progressCallback(50);
-
             string normalizedPath = path;
             if (!normalizedPath.EndsWith(Path.DirectorySeparatorChar.ToString()) && !normalizedPath.EndsWith(Path.AltDirectorySeparatorChar.ToString())) {
                 normalizedPath += Path.DirectorySeparatorChar;
             }
 
             lock (CacheLock) {
+                int total = ProcessPathMap.Count;
+                int current = 0;
+                
                 foreach (KeyValuePair<int, string> kvp in ProcessPathMap) {
+                    current++;
+                    if (current % 25 == 0 && total > 0) {
+                        progressCallback(40 + (int)((current / (double)total) * 45)); // Scales 40 -> 85
+                    }
+
                     int pid = kvp.Key;
                     string procPath = kvp.Value;
                     if (procPath != null && (procPath.StartsWith(normalizedPath, StringComparison.OrdinalIgnoreCase) || procPath.Equals(path, StringComparison.OrdinalIgnoreCase))) {
@@ -298,10 +345,12 @@ public class UnlockerForm : Form {
                     }
                 }
             }
-            progressCallback(100);
+            progressCallback(95);
         } else if (File.Exists(path)) {
-            progressCallback(50);
+            progressCallback(60);
             var pids = GetProcessesLockingFiles(new string[] { path });
+            progressCallback(85);
+            
             foreach (int pid in pids) {
                 if (addedPids.Add(pid)) {
                     finalLockingProcesses.Add(new ProcessItem {
@@ -311,9 +360,10 @@ public class UnlockerForm : Form {
                     });
                 }
             }
-            progressCallback(100);
+            progressCallback(95);
         }
 
+        progressCallback(100);
         return finalLockingProcesses;
     }
 
@@ -325,17 +375,6 @@ public class UnlockerForm : Form {
         } catch (IOException ex) {
             int errorCode = Marshal.GetHRForException(ex) & 0xFFFF;
             return (errorCode == 32 || errorCode == 33);
-        } catch (UnauthorizedAccessException) {
-            try {
-                using (FileStream fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite)) {
-                    return false;
-                }
-            } catch (IOException ex) {
-                int errorCode = Marshal.GetHRForException(ex) & 0xFFFF;
-                return (errorCode == 32 || errorCode == 33);
-            } catch {
-                return false;
-            }
         } catch {
             return false;
         }
@@ -347,9 +386,7 @@ public class UnlockerForm : Form {
 
         var validPaths = new List<string>(paths.Length);
         foreach (string p in paths) {
-            if (File.Exists(p)) {
-                validPaths.Add(p);
-            }
+            if (File.Exists(p)) validPaths.Add(p);
         }
         if (validPaths.Count == 0) return pids;
 
@@ -458,6 +495,26 @@ public class UnlockerForm : Form {
         }
     }
 
+    private bool KillProcessSafely(int pid, string name) {
+        try {
+            using (var p = Process.GetProcessById(pid)) {
+                Log("Attempting to terminate " + name + " (PID: " + pid + ")...");
+                p.Kill();
+                
+                // Better fallback timing method
+                if (!p.WaitForExit(1500)) {
+                    Log("Warning: " + name + " (PID: " + pid + ") did not fully exit within 1.5 seconds.");
+                } else {
+                    Log("Successfully terminated " + name + " (PID: " + pid + ").");
+                }
+            }
+            return true;
+        } catch (Exception ex) {
+            Log("Failed to terminate " + name + " (PID: " + pid + "). Error: " + ex.Message);
+            return false;
+        }
+    }
+
     private void BtnKill_Click(object sender, EventArgs e) {
         if (listView.SelectedItems.Count == 0) return;
         var item = listView.SelectedItems[0].Tag as ProcessItem;
@@ -465,15 +522,15 @@ public class UnlockerForm : Form {
 
         var confirm = MessageBox.Show("Are you sure you want to terminate '" + item.Name + "'?", "Warning", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
         if (confirm == DialogResult.Yes) {
-            try {
-                using (var p = Process.GetProcessById(item.Pid)) {
-                    p.Kill();
-                    p.WaitForExit(1000); 
-                }
+            if (KillProcessSafely(item.Pid, item.Name)) {
                 MessageBox.Show("Process successfully terminated.", "Success", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 StartAsyncScan(true); 
-            } catch {
-                PromptForElevation();
+            } else {
+                if (!isAdmin) {
+                    PromptForElevation();
+                } else {
+                    MessageBox.Show("Failed to terminate process. It may be a critical system service or access is denied.", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
             }
         }
     }
@@ -492,34 +549,29 @@ public class UnlockerForm : Form {
         var confirm = MessageBox.Show("Are you sure you want to terminate all " + targets.Count + " locking processes?", "Warning", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
         if (confirm == DialogResult.Yes) {
             bool failedAny = false;
-            var killedProcesses = new List<Process>();
+            
             foreach (var pi in targets) {
-                try {
-                    var p = Process.GetProcessById(pi.Pid);
-                    p.Kill();
-                    killedProcesses.Add(p);
-                } catch {
+                if (!KillProcessSafely(pi.Pid, pi.Name)) {
                     failedAny = true;
                 }
-            }
-
-            foreach (var p in killedProcesses) {
-                try {
-                    p.WaitForExit(1000);
-                    p.Dispose();
-                } catch {}
             }
 
             if (!failedAny) {
                 MessageBox.Show("All processes successfully terminated.", "Success", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 StartAsyncScan(true); 
             } else {
-                PromptForElevation();
+                if (!isAdmin) {
+                    PromptForElevation();
+                } else {
+                    MessageBox.Show("Failed to terminate one or more processes. See the log in AppData for details.", "Incomplete", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    StartAsyncScan(true);
+                }
             }
         }
     }
 
     private void PromptForElevation() {
+        Log("Prompting user for elevation...");
         var elevate = MessageBox.Show("Administrative privileges are required to close this process.\n\nWould you like to restart UnBlock as Administrator?", "Elevation Required", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
         if (elevate == DialogResult.Yes) {
             try {
@@ -530,6 +582,7 @@ public class UnlockerForm : Form {
                 Process.Start(startInfo);
                 this.Close();
             } catch (Exception ex) {
+                Log("Elevation failed: " + ex.Message);
                 MessageBox.Show("Failed to elevate: " + ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
@@ -542,10 +595,8 @@ public class UnlockerForm : Form {
                 string tempFile = Path.GetTempFileName();
                 RefreshProcessSnapshot(true);
                 IsFileLockedHeuristic(tempFile);
-                List<int> pids = GetProcessesLockingFiles(new string[] { tempFile });
-                if (File.Exists(tempFile)) {
-                    File.Delete(tempFile);
-                }
+                GetProcessesLockingFiles(new string[] { tempFile });
+                if (File.Exists(tempFile)) File.Delete(tempFile);
             } catch {}
             return;
         }
