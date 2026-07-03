@@ -6,7 +6,7 @@ Unlike heavy, opaque utilities, UnBlock compiles locally on your machine during 
 
 ---
 
-## ⚡ Key Features
+## Key Features
 
 * **Instant Folder Scanning**: Bypasses slow, disk-heavy directory traversal by directly querying active system processes executing out of the target folder.
 * **Direct File Handle Resolution**: Leverages the native Windows Restart Manager API to pinpoint the exact application holding the lock.
@@ -16,7 +16,7 @@ Unlike heavy, opaque utilities, UnBlock compiles locally on your machine during 
 
 ---
 
-## 🔒 Security & Trust Transparency
+## Security & Trust Transparency
 
 Because file-unlocking utilities require administrative access, UnBlock prioritizes complete open-source transparency:
 * **No Pre-compiled Binaries**: The installation script builds the executable directly on your machine from the provided source code.
@@ -25,7 +25,7 @@ Because file-unlocking utilities require administrative access, UnBlock prioriti
 
 ---
 
-## 🚀 Installation & Setup
+## Installation & Setup
 
 1. Clone or download this repository to your local machine.
 2. Right-click `install.bat` and select **Run as administrator**.
@@ -34,7 +34,7 @@ Because file-unlocking utilities require administrative access, UnBlock prioriti
 
 ---
 
-## 🛠️ How to Use
+## How to Use
 
 1. Navigate to the locked file or folder in Windows Explorer.
 2. Right-click the target resource and select your action:
@@ -50,7 +50,7 @@ Because file-unlocking utilities require administrative access, UnBlock prioriti
 
 ---
 
-## ❌ Uninstallation
+## Uninstallation
 
 1. Navigate to your installation folder (Default: `C:\Program Files\UnBlock`).
 2. Right-click `uninstall.bat` and select **Run as administrator**.
@@ -58,6 +58,6 @@ Because file-unlocking utilities require administrative access, UnBlock prioriti
 
 ---
 
-## 📄 License
+## License
 
 This project is open-source and available under the [MIT License](LICENSE).
