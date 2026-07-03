@@ -610,39 +610,13 @@ public class UnlockerForm : Form {
 
 Set-Content -Path $CsPath -Value $CsCode -Encoding UTF8 -Force
 
-# Locate compiler
-$csc = $null
-if (Test-Path "C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe") {
-    $csc = "C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
-} elseif (Test-Path "C:\Windows\Microsoft.NET\Framework\v4.0.30319\csc.exe") {
-    $csc = "C:\Windows\Microsoft.NET\Framework\v4.0.30319\csc.exe"
-}
-
-if ($null -eq $csc) {
-    [System.Windows.Forms.MessageBox]::Show("Error: Built-in compiler not found. Compilation aborted.", "Error", "OK", "Error")
-    Write-Host "Error: Built-in C# compiler (csc.exe) was not found."
-    Exit
-}
-
-# Compile and actively check stdout/stderr for compilation troubleshooting
-$argString = "/nologo /target:winexe /out:`"$ExePath`" /reference:System.Windows.Forms.dll,System.Drawing.dll,System.dll,System.Core.dll `"$CsPath`""
-$pInfo = New-Object System.Diagnostics.ProcessStartInfo
-$pInfo.FileName = $csc
-$pInfo.Arguments = $argString
-$pInfo.RedirectStandardOutput = $true
-$pInfo.RedirectStandardError = $true
-$pInfo.UseShellExecute = $false
-$pInfo.CreateNoWindow = $true
-
-$proc = [System.Diagnostics.Process]::Start($pInfo)
-$stdout = $proc.StandardOutput.ReadToEnd()
-$stderr = $proc.StandardError.ReadToEnd()
-$proc.WaitForExit()
-
-if ($proc.ExitCode -eq 0) {
+# Compile the C# code into a Windows Application natively using PowerShell (no external csc.exe required)
+try {
+    Add-Type -TypeDefinition $CsCode -Language CSharp -OutputAssembly $ExePath -OutputType WindowsApplication -ReferencedAssemblies "System.Windows.Forms.dll", "System.Drawing.dll", "System.dll", "System.Core.dll" -ErrorAction Stop
     Remove-Item -Path $CsPath -Force -ErrorAction SilentlyContinue
-} else {
-    [System.Windows.Forms.MessageBox]::Show("Compilation failed!`n`nErrors:`n$stdout`n$stderr", "Error", "OK", "Error")
+} catch {
+    $errMsg = $_.Exception.Message
+    [System.Windows.Forms.MessageBox]::Show("Compilation failed!`n`nErrors:`n$errMsg", "Error", "OK", "Error")
     Exit
 }
 
