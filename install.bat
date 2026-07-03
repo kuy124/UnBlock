@@ -293,7 +293,7 @@ public class UnlockerForm : Form {
         }
     }
 
-    // --- Core 3-Tier Scan Logic ---
+    // --- Core Multi-Tier Scan Logic ---
     private List<ProcessItem> Run3TierScan(string path, Action<int> progressCallback) {
         var finalLockingProcesses = new List<ProcessItem>();
         var addedPids = new HashSet<int>();
@@ -319,89 +319,67 @@ public class UnlockerForm : Form {
                 }
             }
 
-            // 2. PARALLEL BFS SCAN PATH: Gathers sub-files shallowest-first to prevent disk head thrashing
+            progressCallback(20);
+
+            // 2. FAST SINGLE-PASS DIRECTORY CRAWLING
+            // Enumerate files up to 50,000 using high-performance EnumerateFileSystemInfos (single metadata query per directory)
             var files = new List<string>();
             var dirQueue = new Queue<string>();
             dirQueue.Enqueue(path);
 
             try {
-                while (dirQueue.Count > 0 && files.Count < 10000) {
+                while (dirQueue.Count > 0 && files.Count < 50000) {
                     string currentDir = dirQueue.Dequeue();
                     try {
-                        string[] dirFiles = Directory.GetFiles(currentDir, "*.*");
-                        files.AddRange(dirFiles);
-                    } catch {}
-
-                    if (files.Count >= 10000) break;
-
-                    try {
-                        string[] subDirs = Directory.GetDirectories(currentDir);
-                        foreach (string sub in subDirs) {
-                            dirQueue.Enqueue(sub);
+                        DirectoryInfo di = new DirectoryInfo(currentDir);
+                        foreach (FileSystemInfo info in di.EnumerateFileSystemInfos()) {
+                            if ((info.Attributes & FileAttributes.Directory) == FileAttributes.Directory) {
+                                dirQueue.Enqueue(info.FullName);
+                            } else {
+                                files.Add(info.FullName);
+                                if (files.Count >= 50000) break;
+                            }
                         }
-                    } catch {}
+                    } catch {
+                        // Ignore permission-restricted directories gracefully
+                    }
                 }
             } catch {}
+
+            progressCallback(40);
 
             if (files.Count == 0) {
                 progressCallback(100);
                 return finalLockingProcesses;
             }
 
-            // Tier 1 Parallel Heuristic Filter
-            var lockedFiles = new List<string>();
-            object lockObj = new object();
-            int processedCount = 0;
-            int totalFiles = files.Count;
+            // 3. HIGH-SPEED BATCH RESTART MANAGER RESOLUTION
+            // No disk-thrashing FileStream.Open calls. We pass batches directly to Restart Manager.
+            int batchSize = 1000;
+            int totalBatches = (int)Math.Ceiling((double)files.Count / batchSize);
 
-            Parallel.ForEach(files, new ParallelOptions { MaxDegreeOfParallelism = Math.Max(1, (int)(Environment.ProcessorCount * 0.75)) }, delegate(string file) {
-                if (IsFileLockedHeuristic(file)) {
-                    lock (lockObj) {
-                        lockedFiles.Add(file);
+            for (int i = 0; i < files.Count; i += batchSize) {
+                int size = Math.Min(batchSize, files.Count - i);
+                string[] chunk = new string[size];
+                files.CopyTo(i, chunk, 0, size);
+
+                var pids = GetProcessesLockingFiles(chunk);
+                foreach (int pid in pids) {
+                    if (addedPids.Add(pid)) {
+                        finalLockingProcesses.Add(new ProcessItem {
+                            Pid = pid,
+                            Name = GetProcessName(pid),
+                            Path = GetProcessPath(pid) ?? "Unknown (Protected/Elevated)"
+                        });
                     }
                 }
-                int current = System.Threading.Interlocked.Increment(ref processedCount);
-                if (current % 100 == 0 || current == totalFiles) {
-                    int percent = (int)(((double)current / totalFiles) * 50); // First 50% for fast filtering
-                    progressCallback(percent);
-                }
-            });
 
-            // Tier 2 Batching for Restart Manager
-            if (lockedFiles.Count > 0) {
-                int batchSize = 200;
-                int totalBatches = (int)Math.Ceiling((double)lockedFiles.Count / batchSize);
-
-                for (int i = 0; i < lockedFiles.Count; i += batchSize) {
-                    int size = Math.Min(batchSize, lockedFiles.Count - i);
-                    string[] chunk = new string[size];
-                    lockedFiles.CopyTo(i, chunk, 0, size);
-
-                    var pids = GetProcessesLockingFiles(chunk);
-                    foreach (int pid in pids) {
-                        if (addedPids.Add(pid)) {
-                            finalLockingProcesses.Add(new ProcessItem {
-                                Pid = pid,
-                                Name = GetProcessName(pid),
-                                Path = GetProcessPath(pid) ?? "Unknown (Protected/Elevated)"
-                            });
-                        }
-                    }
-
-                    int currentBatch = (i / batchSize) + 1;
-                    int percent = 50 + (int)(((double)currentBatch / totalBatches) * 50);
-                    progressCallback(percent);
-                }
-            } else {
-                progressCallback(100);
+                int currentBatch = (i / batchSize) + 1;
+                int percent = 40 + (int)(((double)currentBatch / totalBatches) * 60);
+                progressCallback(percent);
             }
         } else if (File.Exists(path)) {
-            progressCallback(25);
-            if (!IsFileLockedHeuristic(path)) {
-                progressCallback(100);
-                return finalLockingProcesses;
-            }
-            progressCallback(50);
+            progressCallback(30);
             var pids = GetProcessesLockingFiles(new string[] { path });
             foreach (int pid in pids) {
                 if (addedPids.Add(pid)) {
@@ -420,28 +398,21 @@ public class UnlockerForm : Form {
 
     public static bool IsFileLockedHeuristic(string filePath) {
         try {
-            // First attempt: Open for reading with zero sharing.
-            // If the file is unlocked, this succeeds instantly even on read-only/permission-restricted files.
             using (FileStream fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.None)) {
                 return false;
             }
         } catch (IOException ex) {
             int errorCode = Marshal.GetHRForException(ex) & 0xFFFF;
-            // 32 = ERROR_SHARING_VIOLATION, 33 = ERROR_LOCK_VIOLATION
             return (errorCode == 32 || errorCode == 33);
         } catch (UnauthorizedAccessException) {
-            // Under access-restricted directories (e.g. Program Files), some unlocked files throw Access Denied.
-            // We verify by attempting to open with full ReadWrite sharing.
             try {
                 using (FileStream fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite)) {
-                    // Succeeded with full sharing - meaning the file is completely UNLOCKED (just write-protected)
                     return false;
                 }
             } catch (IOException ex) {
                 int errorCode = Marshal.GetHRForException(ex) & 0xFFFF;
                 return (errorCode == 32 || errorCode == 33);
             } catch {
-                // Any other exception indicates strict ACL permissions, not an active process handle lock.
                 return false;
             }
         } catch {
@@ -453,13 +424,23 @@ public class UnlockerForm : Form {
         var pids = new List<int>();
         if (paths == null || paths.Length == 0) return pids;
 
+        // Ensure target files physically exist before registering to prevent Restart Manager failure
+        var validPaths = new List<string>(paths.Length);
+        foreach (string p in paths) {
+            if (File.Exists(p)) {
+                validPaths.Add(p);
+            }
+        }
+        if (validPaths.Count == 0) return pids;
+
         uint handle;
         string key = Guid.NewGuid().ToString();
         int res = RmStartSession(out handle, 0, key);
         if (res != 0) return pids;
 
         try {
-            res = RmRegisterResources(handle, (uint)paths.Length, paths, 0, null, 0, null);
+            string[] pathArray = validPaths.ToArray();
+            res = RmRegisterResources(handle, (uint)pathArray.Length, pathArray, 0, null, 0, null);
             if (res != 0) return pids;
 
             uint pnProcInfoNeeded = 0;
