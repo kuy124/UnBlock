@@ -148,7 +148,7 @@ public class UnlockerForm : Form {
     public UnlockerForm(string path) {
         this.targetPath = path.TrimEnd('"');
         InitializeComponent();
-        StartAsyncScan();
+        StartAsyncScan(false);
     }
 
     private void InitializeComponent() {
@@ -252,10 +252,22 @@ public class UnlockerForm : Form {
         public string Path { get; set; }
     }
 
-    private void StartAsyncScan() {
+    private void StartAsyncScan(bool forceRefresh = false) {
+        MethodInvoker initUI = delegate {
+            progressBar.Value = 0;
+            progressBar.Visible = true;
+            lblTitle.Text = "Scanning Resource Locks...";
+        };
+
+        if (this.InvokeRequired) {
+            this.BeginInvoke(initUI);
+        } else {
+            initUI();
+        }
+
         Task.Factory.StartNew(delegate {
             try {
-                List<ProcessItem> results = Run3TierScan(targetPath, delegate(int val) {
+                List<ProcessItem> results = Run3TierScan(targetPath, forceRefresh, delegate(int val) {
                     this.BeginInvoke(new MethodInvoker(delegate {
                         progressBar.Value = val;
                     }));
@@ -294,12 +306,12 @@ public class UnlockerForm : Form {
     }
 
     // --- Core Multi-Tier Scan Logic ---
-    private List<ProcessItem> Run3TierScan(string path, Action<int> progressCallback) {
+    private List<ProcessItem> Run3TierScan(string path, bool forceRefresh, Action<int> progressCallback) {
         var finalLockingProcesses = new List<ProcessItem>();
         var addedPids = new HashSet<int>();
 
         // Proactively snapshots PIDs and resolves Executable Paths in memory
-        RefreshProcessSnapshot();
+        RefreshProcessSnapshot(forceRefresh);
 
         if (Directory.Exists(path)) {
             // 1. FAST PROCESS MATCH PATH: Instantly identify any process executing inside this directory tree
@@ -464,9 +476,9 @@ public class UnlockerForm : Form {
         return pids;
     }
 
-    public static void RefreshProcessSnapshot() {
+    public static void RefreshProcessSnapshot(bool force = false) {
         lock (CacheLock) {
-            if (DateTime.UtcNow - lastSnapshotTime < CacheTtl) return;
+            if (!force && (DateTime.UtcNow - lastSnapshotTime < CacheTtl)) return;
 
             IntPtr hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
             if (hSnapshot == INVALID_HANDLE_VALUE) return;
@@ -550,9 +562,10 @@ public class UnlockerForm : Form {
             try {
                 using (var p = Process.GetProcessById(item.Pid)) {
                     p.Kill();
+                    p.WaitForExit(1000); // Allow OS up to 1s to fully reclaim and release resource handles
                 }
                 MessageBox.Show("Process successfully terminated.", "Success", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                StartAsyncScan();
+                StartAsyncScan(true); // Force snapshot refresh
             } catch {
                 PromptForElevation();
             }
@@ -573,19 +586,28 @@ public class UnlockerForm : Form {
         var confirm = MessageBox.Show("Are you sure you want to terminate all " + targets.Count + " locking processes?", "Warning", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
         if (confirm == DialogResult.Yes) {
             bool failedAny = false;
+            var killedProcesses = new List<Process>();
             foreach (var pi in targets) {
                 try {
-                    using (var p = Process.GetProcessById(pi.Pid)) {
-                        p.Kill();
-                    }
+                    var p = Process.GetProcessById(pi.Pid);
+                    p.Kill();
+                    killedProcesses.Add(p);
                 } catch {
                     failedAny = true;
                 }
             }
 
+            // Sync handle release to make sure processes are fully unloaded before re-scan
+            foreach (var p in killedProcesses) {
+                try {
+                    p.WaitForExit(1000);
+                    p.Dispose();
+                } catch {}
+            }
+
             if (!failedAny) {
                 MessageBox.Show("All processes successfully terminated.", "Success", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                StartAsyncScan();
+                StartAsyncScan(true); // Force snapshot refresh
             } else {
                 PromptForElevation();
             }
@@ -613,7 +635,7 @@ public class UnlockerForm : Form {
         if (args.Length == 1 && args[0] == "[WARMUP]") {
             try {
                 string tempFile = Path.GetTempFileName();
-                RefreshProcessSnapshot();
+                RefreshProcessSnapshot(true);
                 IsFileLockedHeuristic(tempFile);
                 List<int> pids = GetProcessesLockingFiles(new string[] { tempFile });
                 if (File.Exists(tempFile)) {
