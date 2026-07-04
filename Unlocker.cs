@@ -265,7 +265,7 @@ public class UnlockerForm : Form {
             initUI();
         }
 
-        // Prevent Windows ThreadPool delay by aggressively forcing instantaneous worker threads
+        // Pre-allocate thread capacity to avoid warm-up delays
         int minWorker, minIOC;
         ThreadPool.GetMinThreads(out minWorker, out minIOC);
         ThreadPool.SetMinThreads(Math.Max(minWorker, Environment.ProcessorCount * 16), Math.Max(minIOC, 64));
@@ -275,7 +275,7 @@ public class UnlockerForm : Form {
                 Log("Initiating Scan...");
                 List<ProcessItem> results = Run3TierScan(targetPath, forceRefresh, delegate(int val) {
                     this.BeginInvoke(new MethodInvoker(delegate {
-                        progressBar.Value = val;
+                        if (progressBar.Value != val) progressBar.Value = val;
                     }));
                 });
 
@@ -313,17 +313,18 @@ public class UnlockerForm : Form {
         }
     }
 
-    // High-speed API collision check to instantly reveal locks without opening the file
+    // Stabilized API collision check
     private static bool IsPathLockedFast(string path, bool isDir) {
         uint flags = isDir ? FILE_FLAG_BACKUP_SEMANTICS : 0;
         IntPtr handle = CreateFile(path, 0, FILE_SHARE_NONE, IntPtr.Zero, OPEN_EXISTING, flags, IntPtr.Zero);
         
-        if (handle == INVALID_HANDLE_VALUE) {
-            int err = Marshal.GetLastWin32Error();
-            return (err == 32 || err == 33); // 32 = ERROR_SHARING_VIOLATION, 33 = ERROR_LOCK_VIOLATION
+        if (handle != INVALID_HANDLE_VALUE) {
+            CloseHandle(handle);
+            return false;
         }
-        CloseHandle(handle);
-        return false;
+        
+        int err = Marshal.GetLastWin32Error();
+        return (err == 32 || err == 33); // 32 = ERROR_SHARING_VIOLATION, 33 = ERROR_LOCK_VIOLATION
     }
 
     private List<ProcessItem> Run3TierScan(string path, bool forceRefresh, Action<int> progressCallback) {
@@ -363,37 +364,32 @@ public class UnlockerForm : Form {
         progressCallback(20);
 
         // Tier 2: Highly Aggressive Multi-Threaded Pre-Collision Scan
-        // Blasts through huge directories concurrently using ThreadPool Injection
         var lockedPaths = new ConcurrentBag<string>();
         
         if (isDir) {
             if (IsPathLockedFast(path, true)) lockedPaths.Add(path);
 
             int scannedCount = 0;
-            long lastUpdate = DateTime.Now.Ticks;
             var tcs = new TaskCompletionSource<bool>();
-            int activeWorkers = 1; // Starts at 1 for the root directory thread
+            int activeWorkers = 1; // Start at 1 for the root task
 
-            // C# 5.0 compatible Action delegate wrapper for recursion
+            // Heartbeat UI Thread: Eliminates UI lag by separating progress events from worker threads
+            bool isScanning = true;
+            ThreadPool.QueueUserWorkItem(delegate {
+                while (isScanning) {
+                    int c = Thread.VolatileRead(ref scannedCount);
+                    progressCallback(20 + Math.Min(50, c / 1500));
+                    Thread.Sleep(100); // 10 FPS Smooth Updates
+                }
+            });
+
+            // Stabilized recursive worker
             Action<string> ProcessDirectory = null;
-            ProcessDirectory = delegate(string dir)
-            {
-                try
-                {
+            ProcessDirectory = delegate(string dir) {
+                try {
                     string[] files = Directory.GetFiles(dir);
                     foreach (string file in files) {
-                        int c = Interlocked.Increment(ref scannedCount);
-                        
-                        // Sparse UI updates to prevent thread blocking (Updates only once per 60ms)
-                        if (c % 1000 == 0) {
-                            long now = DateTime.Now.Ticks;
-                            long lastTime = Interlocked.Read(ref lastUpdate);
-                            if (TimeSpan.FromTicks(now - lastTime).TotalMilliseconds > 60) {
-                                Interlocked.Exchange(ref lastUpdate, now);
-                                progressCallback(20 + Math.Min(50, c / 2000));
-                            }
-                        }
-
+                        Interlocked.Increment(ref scannedCount);
                         if (IsPathLockedFast(file, false)) {
                             lockedPaths.Add(file);
                         }
@@ -406,13 +402,21 @@ public class UnlockerForm : Form {
                         try {
                             if ((File.GetAttributes(sub) & FileAttributes.ReparsePoint) == 0) {
                                 Interlocked.Increment(ref activeWorkers);
-                                string safeSub = sub; // Fix modified closure for older C# versions
-                                ThreadPool.QueueUserWorkItem(delegate { ProcessDirectory(safeSub); });
+                                string safeSub = sub; 
+                                bool queued = false;
+                                
+                                try {
+                                    queued = ThreadPool.QueueUserWorkItem(delegate { ProcessDirectory(safeSub); });
+                                } finally {
+                                    // Extreme Stability: If threadpool rejects, immediately decrement to prevent deadlocks
+                                    if (!queued) {
+                                        if (Interlocked.Decrement(ref activeWorkers) == 0) tcs.TrySetResult(true);
+                                    }
+                                }
                             }
-                        } catch { } // Ignore inaccessible sub-folders
+                        } catch { } // Ignore locked sub-folders
                     }
-                }
-                catch { } // Ignore locked master folders
+                } catch { } 
                 finally {
                     if (Interlocked.Decrement(ref activeWorkers) == 0) {
                         tcs.TrySetResult(true);
@@ -421,8 +425,9 @@ public class UnlockerForm : Form {
             };
 
             // Kick off the multi-threaded blitz
-            ThreadPool.QueueUserWorkItem(delegate { ProcessDirectory(path); });
-            tcs.Task.Wait(); // Wait for all concurrent workers to exhaust the directory tree
+            ProcessDirectory(path);
+            tcs.Task.Wait(); // Safely wait
+            isScanning = false; // Kill heartbeat monitor
 
         } else if (File.Exists(path)) {
             if (IsPathLockedFast(path, false)) lockedPaths.Add(path);
@@ -430,10 +435,11 @@ public class UnlockerForm : Form {
 
         progressCallback(75);
 
-        // Tier 3: Resolve PIDs using Restart Manager exclusively on Confirmed Locked files
+        // Tier 3: Resolve PIDs using Restart Manager on Confirmed Locked files
         var lockedArray = lockedPaths.ToArray();
         if (lockedArray.Length > 0) {
-            int chunkSize = 2000;
+            // Smaller chunk size (200) strictly prevents API memory overload in RM
+            int chunkSize = 200; 
             int totalChunks = (lockedArray.Length + chunkSize - 1) / chunkSize;
 
             for (int i = 0; i < totalChunks; i++) {
@@ -488,9 +494,7 @@ public class UnlockerForm : Form {
             string[] pathArray = validPaths.ToArray();
             res = RmRegisterResources(handle, (uint)pathArray.Length, pathArray, 0, null, 0, null);
             
-            // Failsafe: Passing directories directly can cause ERROR_ACCESS_DENIED (Code 5) on older Windows.
-            // When this happens, we strip directories from the list and only use RM on the raw files.
-            if (res == 5) {
+            if (res == 5) { // ERROR_ACCESS_DENIED fallback loop
                 RmEndSession(handle);
                 
                 var filesOnly = new List<string>();
