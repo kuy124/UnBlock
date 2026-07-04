@@ -1,11 +1,13 @@
 using System;
 using System.IO;
 using System.Collections.Generic;
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Security.Principal;
 using System.Windows.Forms;
 using System.Drawing;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Text;
 
@@ -58,7 +60,6 @@ public class UnlockerForm : Form {
     private const uint FILE_FLAG_BACKUP_SEMANTICS = 0x02000000;
     private const uint OPEN_EXISTING = 3;
     private const uint FILE_SHARE_NONE = 0;
-    private const uint GENERIC_READ = 0x80000000;
     private static readonly IntPtr INVALID_HANDLE_VALUE = new IntPtr(-1);
 
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Auto)]
@@ -117,7 +118,6 @@ public class UnlockerForm : Form {
     public UnlockerForm(string path) {
         this.targetPath = path.TrimEnd('"');
         
-        // Setup Privilege Tracking & Logging
         WindowsIdentity id = WindowsIdentity.GetCurrent();
         WindowsPrincipal principal = new WindowsPrincipal(id);
         isAdmin = principal.IsInRole(WindowsBuiltInRole.Administrator);
@@ -139,7 +139,7 @@ public class UnlockerForm : Form {
     private void Log(string message) {
         try {
             File.AppendAllText(logFile, DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + " - " + message + Environment.NewLine);
-        } catch { } // Failsafe if log is locked
+        } catch { } 
     }
 
     private void InitializeComponent() {
@@ -256,7 +256,7 @@ public class UnlockerForm : Form {
         MethodInvoker initUI = delegate {
             progressBar.Value = 0;
             progressBar.Visible = true;
-            lblTitle.Text = "Scanning Resource Locks...";
+            lblTitle.Text = "Scanning Resource Locks (Turbo Mode)...";
         };
 
         if (this.InvokeRequired) {
@@ -264,6 +264,11 @@ public class UnlockerForm : Form {
         } else {
             initUI();
         }
+
+        // Prevent Windows ThreadPool delay by aggressively forcing instantaneous worker threads
+        int minWorker, minIOC;
+        ThreadPool.GetMinThreads(out minWorker, out minIOC);
+        ThreadPool.SetMinThreads(Math.Max(minWorker, Environment.ProcessorCount * 16), Math.Max(minIOC, 64));
 
         Task.Factory.StartNew(delegate {
             try {
@@ -308,59 +313,150 @@ public class UnlockerForm : Form {
         }
     }
 
+    // High-speed API collision check to instantly reveal locks without opening the file
+    private static bool IsPathLockedFast(string path, bool isDir) {
+        uint flags = isDir ? FILE_FLAG_BACKUP_SEMANTICS : 0;
+        IntPtr handle = CreateFile(path, 0, FILE_SHARE_NONE, IntPtr.Zero, OPEN_EXISTING, flags, IntPtr.Zero);
+        
+        if (handle == INVALID_HANDLE_VALUE) {
+            int err = Marshal.GetLastWin32Error();
+            return (err == 32 || err == 33); // 32 = ERROR_SHARING_VIOLATION, 33 = ERROR_LOCK_VIOLATION
+        }
+        CloseHandle(handle);
+        return false;
+    }
+
     private List<ProcessItem> Run3TierScan(string path, bool forceRefresh, Action<int> progressCallback) {
         var finalLockingProcesses = new List<ProcessItem>();
         var addedPids = new HashSet<int>();
 
-        progressCallback(10);
+        progressCallback(5);
         RefreshProcessSnapshot(forceRefresh);
-        progressCallback(40);
+        progressCallback(10);
 
-        if (Directory.Exists(path)) {
-            string normalizedPath = path;
-            if (!normalizedPath.EndsWith(Path.DirectorySeparatorChar.ToString()) && !normalizedPath.EndsWith(Path.AltDirectorySeparatorChar.ToString())) {
-                normalizedPath += Path.DirectorySeparatorChar;
-            }
+        string normalizedPath = path;
+        bool isDir = Directory.Exists(path);
+        if (isDir && !normalizedPath.EndsWith(Path.DirectorySeparatorChar.ToString()) && !normalizedPath.EndsWith(Path.AltDirectorySeparatorChar.ToString())) {
+            normalizedPath += Path.DirectorySeparatorChar;
+        }
 
-            lock (CacheLock) {
-                int total = ProcessPathMap.Count;
-                int current = 0;
-                
-                foreach (KeyValuePair<int, string> kvp in ProcessPathMap) {
-                    current++;
-                    if (current % 25 == 0 && total > 0) {
-                        progressCallback(40 + (int)((current / (double)total) * 45)); // Scales 40 -> 85
+        // Tier 1: Check Process Executable Paths (Finds apps running *from* inside the folder)
+        lock (CacheLock) {
+            foreach (KeyValuePair<int, string> kvp in ProcessPathMap) {
+                int pid = kvp.Key;
+                string procPath = kvp.Value;
+                if (procPath != null) {
+                    bool match = isDir ? 
+                        (procPath.StartsWith(normalizedPath, StringComparison.OrdinalIgnoreCase) || procPath.Equals(path, StringComparison.OrdinalIgnoreCase)) :
+                        procPath.Equals(path, StringComparison.OrdinalIgnoreCase);
+
+                    if (match && addedPids.Add(pid)) {
+                        finalLockingProcesses.Add(new ProcessItem {
+                            Pid = pid,
+                            Name = GetProcessName(pid),
+                            Path = procPath
+                        });
                     }
+                }
+            }
+        }
+        progressCallback(20);
 
-                    int pid = kvp.Key;
-                    string procPath = kvp.Value;
-                    if (procPath != null && (procPath.StartsWith(normalizedPath, StringComparison.OrdinalIgnoreCase) || procPath.Equals(path, StringComparison.OrdinalIgnoreCase))) {
-                        if (addedPids.Add(pid)) {
-                            finalLockingProcesses.Add(new ProcessItem {
-                                Pid = pid,
-                                Name = GetProcessName(pid),
-                                Path = procPath
-                            });
+        // Tier 2: Highly Aggressive Multi-Threaded Pre-Collision Scan
+        // Blasts through huge directories concurrently using ThreadPool Injection
+        var lockedPaths = new ConcurrentBag<string>();
+        
+        if (isDir) {
+            if (IsPathLockedFast(path, true)) lockedPaths.Add(path);
+
+            int scannedCount = 0;
+            long lastUpdate = DateTime.Now.Ticks;
+            var tcs = new TaskCompletionSource<bool>();
+            int activeWorkers = 1; // Starts at 1 for the root directory thread
+
+            // C# 5.0 compatible Action delegate wrapper for recursion
+            Action<string> ProcessDirectory = null;
+            ProcessDirectory = delegate(string dir)
+            {
+                try
+                {
+                    string[] files = Directory.GetFiles(dir);
+                    foreach (string file in files) {
+                        int c = Interlocked.Increment(ref scannedCount);
+                        
+                        // Sparse UI updates to prevent thread blocking (Updates only once per 60ms)
+                        if (c % 1000 == 0) {
+                            long now = DateTime.Now.Ticks;
+                            long lastTime = Interlocked.Read(ref lastUpdate);
+                            if (TimeSpan.FromTicks(now - lastTime).TotalMilliseconds > 60) {
+                                Interlocked.Exchange(ref lastUpdate, now);
+                                progressCallback(20 + Math.Min(50, c / 2000));
+                            }
+                        }
+
+                        if (IsPathLockedFast(file, false)) {
+                            lockedPaths.Add(file);
                         }
                     }
+
+                    string[] subDirs = Directory.GetDirectories(dir);
+                    foreach (string sub in subDirs) {
+                        if (IsPathLockedFast(sub, true)) lockedPaths.Add(sub);
+
+                        try {
+                            if ((File.GetAttributes(sub) & FileAttributes.ReparsePoint) == 0) {
+                                Interlocked.Increment(ref activeWorkers);
+                                string safeSub = sub; // Fix modified closure for older C# versions
+                                ThreadPool.QueueUserWorkItem(delegate { ProcessDirectory(safeSub); });
+                            }
+                        } catch { } // Ignore inaccessible sub-folders
+                    }
                 }
-            }
-            progressCallback(95);
+                catch { } // Ignore locked master folders
+                finally {
+                    if (Interlocked.Decrement(ref activeWorkers) == 0) {
+                        tcs.TrySetResult(true);
+                    }
+                }
+            };
+
+            // Kick off the multi-threaded blitz
+            ThreadPool.QueueUserWorkItem(delegate { ProcessDirectory(path); });
+            tcs.Task.Wait(); // Wait for all concurrent workers to exhaust the directory tree
+
         } else if (File.Exists(path)) {
-            progressCallback(60);
-            var pids = GetProcessesLockingFiles(new string[] { path });
-            progressCallback(85);
-            
-            foreach (int pid in pids) {
-                if (addedPids.Add(pid)) {
-                    finalLockingProcesses.Add(new ProcessItem {
-                        Pid = pid,
-                        Name = GetProcessName(pid),
-                        Path = GetProcessPath(pid) ?? "Unknown (Protected/Elevated)"
-                    });
+            if (IsPathLockedFast(path, false)) lockedPaths.Add(path);
+        }
+
+        progressCallback(75);
+
+        // Tier 3: Resolve PIDs using Restart Manager exclusively on Confirmed Locked files
+        var lockedArray = lockedPaths.ToArray();
+        if (lockedArray.Length > 0) {
+            int chunkSize = 2000;
+            int totalChunks = (lockedArray.Length + chunkSize - 1) / chunkSize;
+
+            for (int i = 0; i < totalChunks; i++) {
+                var chunk = new List<string>();
+                for (int j = i * chunkSize; j < Math.Min((i + 1) * chunkSize, lockedArray.Length); j++) {
+                    chunk.Add(lockedArray[j]);
                 }
+
+                var rmPids = GetProcessesLockingFiles(chunk.ToArray());
+                
+                foreach (int pid in rmPids) {
+                    if (addedPids.Add(pid)) {
+                        finalLockingProcesses.Add(new ProcessItem {
+                            Pid = pid,
+                            Name = GetProcessName(pid),
+                            Path = GetProcessPath(pid) ?? "Unknown (Protected/Elevated)"
+                        });
+                    }
+                }
+                
+                int progress = 75 + (int)(((i + 1) / (double)totalChunks) * 20); // Scales 75 -> 95
+                progressCallback(progress);
             }
-            progressCallback(95);
         }
 
         progressCallback(100);
@@ -368,16 +464,7 @@ public class UnlockerForm : Form {
     }
 
     public static bool IsFileLockedHeuristic(string filePath) {
-        try {
-            using (FileStream fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.None)) {
-                return false;
-            }
-        } catch (IOException ex) {
-            int errorCode = Marshal.GetHRForException(ex) & 0xFFFF;
-            return (errorCode == 32 || errorCode == 33);
-        } catch {
-            return false;
-        }
+        return IsPathLockedFast(filePath, false);
     }
 
     public static List<int> GetProcessesLockingFiles(string[] paths) {
@@ -386,7 +473,9 @@ public class UnlockerForm : Form {
 
         var validPaths = new List<string>(paths.Length);
         foreach (string p in paths) {
-            if (File.Exists(p)) validPaths.Add(p);
+            try {
+                if (File.Exists(p) || Directory.Exists(p)) validPaths.Add(p);
+            } catch { }
         }
         if (validPaths.Count == 0) return pids;
 
@@ -398,6 +487,28 @@ public class UnlockerForm : Form {
         try {
             string[] pathArray = validPaths.ToArray();
             res = RmRegisterResources(handle, (uint)pathArray.Length, pathArray, 0, null, 0, null);
+            
+            // Failsafe: Passing directories directly can cause ERROR_ACCESS_DENIED (Code 5) on older Windows.
+            // When this happens, we strip directories from the list and only use RM on the raw files.
+            if (res == 5) {
+                RmEndSession(handle);
+                
+                var filesOnly = new List<string>();
+                foreach (string p in validPaths) {
+                    try {
+                        if (File.Exists(p)) filesOnly.Add(p);
+                    } catch { }
+                }
+                
+                if (filesOnly.Count == 0) return pids;
+                
+                res = RmStartSession(out handle, 0, Guid.NewGuid().ToString());
+                if (res != 0) return pids;
+                
+                pathArray = filesOnly.ToArray();
+                res = RmRegisterResources(handle, (uint)pathArray.Length, pathArray, 0, null, 0, null);
+            }
+
             if (res != 0) return pids;
 
             uint pnProcInfoNeeded = 0;
@@ -405,7 +516,7 @@ public class UnlockerForm : Form {
             uint lpdwRebootReasons = 0;
 
             res = RmGetList(handle, out pnProcInfoNeeded, ref pnProcInfo, null, ref lpdwRebootReasons);
-            if (res == 234) { 
+            if (res == 234) { // ERROR_MORE_DATA 
                 RM_PROCESS_INFO[] processInfo = new RM_PROCESS_INFO[pnProcInfoNeeded];
                 pnProcInfo = pnProcInfoNeeded;
                 res = RmGetList(handle, out pnProcInfoNeeded, ref pnProcInfo, processInfo, ref lpdwRebootReasons);
@@ -501,7 +612,6 @@ public class UnlockerForm : Form {
                 Log("Attempting to terminate " + name + " (PID: " + pid + ")...");
                 p.Kill();
                 
-                // Better fallback timing method
                 if (!p.WaitForExit(1500)) {
                     Log("Warning: " + name + " (PID: " + pid + ") did not fully exit within 1.5 seconds.");
                 } else {
