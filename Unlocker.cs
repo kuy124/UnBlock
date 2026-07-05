@@ -45,6 +45,24 @@ public class UnlockerForm : Form {
     [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     private static extern bool QueryFullProcessImageName(IntPtr hProcess, int dwFlags, StringBuilder lpExeName, ref int lpdwSize);
 
+    [DllImport("ntdll.dll")]
+    private static extern int NtQuerySystemInformation(int SystemInformationClass, IntPtr SystemInformation, int SystemInformationLength, ref int ReturnLength);
+
+    [DllImport("ntdll.dll")]
+    private static extern int NtQueryObject(IntPtr ObjectHandle, int ObjectInformationClass, IntPtr ObjectInformation, int ObjectInformationLength, ref int ReturnLength);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool DuplicateHandle(IntPtr hSourceProcessHandle, IntPtr hSourceHandle, IntPtr hTargetProcessHandle, out IntPtr lpTargetHandle, uint dwDesiredAccess, bool bInheritHandle, uint dwOptions);
+
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr GetCurrentProcess();
+
+    [DllImport("kernel32.dll")]
+    private static extern uint GetFileType(IntPtr hFile);
+
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Auto)]
+    private static extern int QueryDosDevice(string lpDeviceName, StringBuilder lpTargetPath, int ucchMax);
+
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern IntPtr CreateFile(
         string lpFileName,
@@ -57,9 +75,19 @@ public class UnlockerForm : Form {
 
     private const uint TH32CS_SNAPPROCESS = 0x00000002;
     private const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
-    private const uint FILE_FLAG_BACKUP_SEMANTICS = 0x02000000;
+    private const uint PROCESS_DUP_HANDLE = 0x0040;
+    private const uint DUPLICATE_SAME_ACCESS = 2;
+    private const uint FILE_TYPE_DISK = 1;
+    private const int SystemExtendedHandleInformation = 0x40;
+    
+    // CreateFile Constants
+    private const uint GENERIC_WRITE = 0x40000000;
+    private const uint DELETE_ACCESS = 0x00010000;
+    private const uint FILE_SHARE_READ = 0x00000001;
+    private const uint FILE_SHARE_WRITE = 0x00000002;
+    private const uint FILE_SHARE_DELETE = 0x00000004;
     private const uint OPEN_EXISTING = 3;
-    private const uint FILE_SHARE_NONE = 0;
+    private const uint FILE_FLAG_BACKUP_SEMANTICS = 0x02000000;
     private static readonly IntPtr INVALID_HANDLE_VALUE = new IntPtr(-1);
 
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Auto)]
@@ -77,37 +105,10 @@ public class UnlockerForm : Form {
         public string szExeFile;
     }
 
-    [StructLayout(LayoutKind.Sequential)]
-    public struct RM_UNIQUE_PROCESS {
-        public int dwProcessId;
-        public System.Runtime.InteropServices.ComTypes.FILETIME ProcessStartTime;
+    private struct HandleInfo {
+        public IntPtr HandleValue;
+        public ushort ObjectTypeIndex;
     }
-
-    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-    public struct RM_PROCESS_INFO {
-        public RM_UNIQUE_PROCESS Process;
-        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 256)]
-        public string strAppName;
-        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 64)]
-        public string strServiceShortName;
-        public int ApplicationType;
-        public uint AppStatus;
-        public uint TSSessionId;
-        [MarshalAs(UnmanagedType.Bool)]
-        public bool bRestartable;
-    }
-
-    [DllImport("rstrtmgr.dll", CharSet = CharSet.Unicode)]
-    private static extern int RmRegisterResources(uint pSessionHandle, uint nFiles, string[] rgsFilenames, uint nApplications, [In] RM_UNIQUE_PROCESS[] rgApplications, uint nServices, string[] rgsServiceNames);
-
-    [DllImport("rstrtmgr.dll", CharSet = CharSet.Auto)]
-    private static extern int RmStartSession(out uint pSessionHandle, int dwSessionFlags, string strSessionKey);
-
-    [DllImport("rstrtmgr.dll")]
-    private static extern int RmEndSession(uint pSessionHandle);
-
-    [DllImport("rstrtmgr.dll")]
-    private static extern int RmGetList(uint dwSessionHandle, out uint pnProcInfoNeeded, ref uint pnProcInfo, [In, Out] RM_PROCESS_INFO[] rgAffectedApps, ref uint lpdwRebootReasons);
 
     private static readonly Dictionary<int, string> ProcessPathMap = new Dictionary<int, string>();
     private static readonly Dictionary<int, string> ProcessNameMap = new Dictionary<int, string>();
@@ -128,7 +129,7 @@ public class UnlockerForm : Form {
         logFile = Path.Combine(logDir, "UnBlock.log");
 
         Log("======================================");
-        Log("UnBlock Started");
+        Log("UnBlock Started (Strict Lock Mode)");
         Log("Target: " + targetPath);
         Log("Running as Administrator: " + isAdmin);
 
@@ -169,7 +170,7 @@ public class UnlockerForm : Form {
         };
 
         lblTitle = new Label() {
-            Text = "Scanning Resource Locks...",
+            Text = "Scanning Valid Resource Locks...",
             Location = new Point(20, 50),
             Size = new Size(500, 20),
             Font = new Font("Segoe UI", 11, FontStyle.Bold),
@@ -256,7 +257,7 @@ public class UnlockerForm : Form {
         MethodInvoker initUI = delegate {
             progressBar.Value = 0;
             progressBar.Visible = true;
-            lblTitle.Text = "Scanning Resource Locks (Turbo Mode)...";
+            lblTitle.Text = "Scanning Valid Resource Locks (Instant Mode)...";
         };
 
         if (this.InvokeRequired) {
@@ -265,17 +266,12 @@ public class UnlockerForm : Form {
             initUI();
         }
 
-        // Pre-allocate thread capacity to avoid warm-up delays
-        int minWorker, minIOC;
-        ThreadPool.GetMinThreads(out minWorker, out minIOC);
-        ThreadPool.SetMinThreads(Math.Max(minWorker, Environment.ProcessorCount * 16), Math.Max(minIOC, 64));
-
         Task.Factory.StartNew(delegate {
             try {
                 Log("Initiating Scan...");
-                List<ProcessItem> results = Run3TierScan(targetPath, forceRefresh, delegate(int val) {
+                List<ProcessItem> results = RunFastHandleScan(targetPath, forceRefresh, delegate(int val) {
                     this.BeginInvoke(new MethodInvoker(delegate {
-                        if (progressBar.Value != val) progressBar.Value = val;
+                        if (progressBar.Value != val) progressBar.Value = Math.Min(100, Math.Max(0, val));
                     }));
                 });
 
@@ -302,7 +298,7 @@ public class UnlockerForm : Form {
             listView.Items.Add(lvi);
         }
 
-        Log("Populated UI with " + items.Count + " locking processes.");
+        Log("Populated UI with " + items.Count + " true locking processes.");
         if (listView.Items.Count == 0) {
             ListViewItem emptyItem = new ListViewItem(new string[] { "N/A", "N/A", "No locking processes found." });
             listView.Items.Add(emptyItem);
@@ -313,21 +309,39 @@ public class UnlockerForm : Form {
         }
     }
 
-    // Stabilized API collision check
-    private static bool IsPathLockedFast(string path, bool isDir) {
-        uint flags = isDir ? FILE_FLAG_BACKUP_SEMANTICS : 0;
-        IntPtr handle = CreateFile(path, 0, FILE_SHARE_NONE, IntPtr.Zero, OPEN_EXISTING, flags, IntPtr.Zero);
+    // --- Strict Validity Checker ---
+    // Tests if the discovered handle actually prevents Deleting or Modifying the file/folder.
+    // Skips false positives like 'explorer.exe' which often hold non-blocking passive handles.
+    private static bool IsPathStrictlyLocked(string path) {
+        uint shareMode = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
         
+        // Test 1: Try acquiring Write and Delete permissions. If it succeeds, the handle isn't locking us out.
+        IntPtr handle = CreateFile(path, DELETE_ACCESS | GENERIC_WRITE, shareMode, IntPtr.Zero, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, IntPtr.Zero);
         if (handle != INVALID_HANDLE_VALUE) {
             CloseHandle(handle);
             return false;
         }
-        
+
         int err = Marshal.GetLastWin32Error();
-        return (err == 32 || err == 33); // 32 = ERROR_SHARING_VIOLATION, 33 = ERROR_LOCK_VIOLATION
+        if (err == 32 || err == 33) return true; // 32 = ERROR_SHARING_VIOLATION. It's truly locked!
+
+        // Test 2: If Access Denied (Read-Only file), retry with just Delete access.
+        if (err == 5) {
+            handle = CreateFile(path, DELETE_ACCESS, shareMode, IntPtr.Zero, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, IntPtr.Zero);
+            if (handle != INVALID_HANDLE_VALUE) {
+                CloseHandle(handle);
+                return false; 
+            }
+            err = Marshal.GetLastWin32Error();
+            if (err == 32 || err == 33) return true;
+        }
+
+        // If we can't confirm a sharing violation, assume it's safe to ignore (false positive)
+        return false;
     }
 
-    private List<ProcessItem> Run3TierScan(string path, bool forceRefresh, Action<int> progressCallback) {
+    // High-speed Win32 Memory Lock Scanner 
+    private List<ProcessItem> RunFastHandleScan(string targetPath, bool forceRefresh, Action<int> progressCallback) {
         var finalLockingProcesses = new List<ProcessItem>();
         var addedPids = new HashSet<int>();
 
@@ -335,21 +349,21 @@ public class UnlockerForm : Form {
         RefreshProcessSnapshot(forceRefresh);
         progressCallback(10);
 
-        string normalizedPath = path;
-        bool isDir = Directory.Exists(path);
+        string normalizedPath = targetPath;
+        bool isDir = Directory.Exists(targetPath);
         if (isDir && !normalizedPath.EndsWith(Path.DirectorySeparatorChar.ToString()) && !normalizedPath.EndsWith(Path.AltDirectorySeparatorChar.ToString())) {
             normalizedPath += Path.DirectorySeparatorChar;
         }
 
-        // Tier 1: Check Process Executable Paths (Finds apps running *from* inside the folder)
+        // Tier 1: Process Executable Paths (If a program inside the folder is running, it natively blocks deletion)
         lock (CacheLock) {
             foreach (KeyValuePair<int, string> kvp in ProcessPathMap) {
                 int pid = kvp.Key;
                 string procPath = kvp.Value;
                 if (procPath != null) {
                     bool match = isDir ? 
-                        (procPath.StartsWith(normalizedPath, StringComparison.OrdinalIgnoreCase) || procPath.Equals(path, StringComparison.OrdinalIgnoreCase)) :
-                        procPath.Equals(path, StringComparison.OrdinalIgnoreCase);
+                        (procPath.StartsWith(normalizedPath, StringComparison.OrdinalIgnoreCase) || procPath.Equals(targetPath, StringComparison.OrdinalIgnoreCase)) :
+                        procPath.Equals(targetPath, StringComparison.OrdinalIgnoreCase);
 
                     if (match && addedPids.Add(pid)) {
                         finalLockingProcesses.Add(new ProcessItem {
@@ -363,177 +377,213 @@ public class UnlockerForm : Form {
         }
         progressCallback(20);
 
-        // Tier 2: Highly Aggressive Multi-Threaded Pre-Collision Scan
-        var lockedPaths = new ConcurrentBag<string>();
+        // Tier 2: Instant Global Handle Scan
+        string driveLetter = Path.GetPathRoot(normalizedPath).TrimEnd('\\', '/');
+        string targetDevicePath = normalizedPath;
+
+        if (!string.IsNullOrEmpty(driveLetter)) {
+            StringBuilder sb = new StringBuilder(512);
+            if (QueryDosDevice(driveLetter, sb, sb.Capacity) != 0) {
+                string devicePathRoot = sb.ToString();
+                targetDevicePath = normalizedPath.Replace(driveLetter, devicePathRoot);
+            }
+        }
         
-        if (isDir) {
-            if (IsPathLockedFast(path, true)) lockedPaths.Add(path);
+        string devicePathWithSlash = targetDevicePath;
+        if (!devicePathWithSlash.EndsWith("\\")) devicePathWithSlash += "\\";
+        
+        progressCallback(25);
 
-            int scannedCount = 0;
-            var tcs = new TaskCompletionSource<bool>();
-            int activeWorkers = 1; // Start at 1 for the root task
+        // 1. Snapshot all system handles
+        int bufferSize = 0x10000;
+        IntPtr buffer = Marshal.AllocHGlobal(bufferSize);
+        int length = 0;
+        int status;
 
-            // Heartbeat UI Thread: Eliminates UI lag by separating progress events from worker threads
-            bool isScanning = true;
-            ThreadPool.QueueUserWorkItem(delegate {
-                while (isScanning) {
-                    int c = Thread.VolatileRead(ref scannedCount);
-                    progressCallback(20 + Math.Min(50, c / 1500));
-                    Thread.Sleep(100); // 10 FPS Smooth Updates
-                }
-            });
+        while ((status = NtQuerySystemInformation(SystemExtendedHandleInformation, buffer, bufferSize, ref length)) == unchecked((int)0xC0000004)) {
+            bufferSize = length + 0x10000; 
+            Marshal.FreeHGlobal(buffer);
+            buffer = Marshal.AllocHGlobal(bufferSize);
+        }
 
-            // Stabilized recursive worker
-            Action<string> ProcessDirectory = null;
-            ProcessDirectory = delegate(string dir) {
-                try {
-                    string[] files = Directory.GetFiles(dir);
-                    foreach (string file in files) {
-                        Interlocked.Increment(ref scannedCount);
-                        if (IsPathLockedFast(file, false)) {
-                            lockedPaths.Add(file);
-                        }
-                    }
+        if (status != 0) {
+            Marshal.FreeHGlobal(buffer);
+            return finalLockingProcesses;
+        }
 
-                    string[] subDirs = Directory.GetDirectories(dir);
-                    foreach (string sub in subDirs) {
-                        if (IsPathLockedFast(sub, true)) lockedPaths.Add(sub);
+        progressCallback(40);
 
+        bool is64Bit = Marshal.SizeOf(typeof(IntPtr)) == 8;
+        long handleCount = is64Bit ? Marshal.ReadInt64(buffer) : Marshal.ReadInt32(buffer);
+        IntPtr ptr = new IntPtr(buffer.ToInt64() + (is64Bit ? 16 : 8));
+        int entrySize = is64Bit ? 40 : 28;
+
+        var handlesByPid = new Dictionary<int, List<HandleInfo>>();
+        int currentPid = Process.GetCurrentProcess().Id;
+
+        for (long i = 0; i < handleCount; i++) {
+            int pid = is64Bit ? (int)Marshal.ReadInt64(ptr, 8) : Marshal.ReadInt32(ptr, 4);
+            IntPtr handleValue = is64Bit ? Marshal.ReadIntPtr(ptr, 16) : Marshal.ReadIntPtr(ptr, 8);
+            ushort objTypeIndex = (ushort)Marshal.ReadInt16(ptr, is64Bit ? 30 : 18);
+
+            if (pid != currentPid && pid > 4) { // Filter self & SYSTEM
+                if (!handlesByPid.ContainsKey(pid)) handlesByPid[pid] = new List<HandleInfo>();
+                handlesByPid[pid].Add(new HandleInfo { HandleValue = handleValue, ObjectTypeIndex = objTypeIndex });
+            }
+            ptr = new IntPtr(ptr.ToInt64() + entrySize);
+        }
+
+        Marshal.FreeHGlobal(buffer);
+        progressCallback(50);
+
+        // 2. Discover and Validate handles in parallel
+        int processed = 0;
+        int total = handlesByPid.Count;
+        IntPtr currentProcessHandle = GetCurrentProcess();
+        
+        ushort expectedFileTypeIndex = 0;
+        object lockObj = new object();
+        
+        // Cache validations to prevent re-testing the same file for 50 open handles
+        ConcurrentDictionary<string, bool> pathLockCache = new ConcurrentDictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+
+        Parallel.ForEach(handlesByPid, new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount * 2 }, kvp => {
+            int pid = kvp.Key;
+            Interlocked.Increment(ref processed);
+            
+            if (processed % 10 == 0) {
+                progressCallback(50 + (int)((processed / (float)total) * 45));
+            }
+
+            bool skip = false;
+            lock (lockObj) {
+                skip = addedPids.Contains(pid);
+            }
+            if (skip) return;
+
+            IntPtr hProcess = OpenProcess(PROCESS_DUP_HANDLE, false, pid);
+            if (hProcess == IntPtr.Zero) return;
+
+            try {
+                foreach (var hInfo in kvp.Value) {
+                    ushort currentFileIndex;
+                    lock (lockObj) { currentFileIndex = expectedFileTypeIndex; }
+
+                    if (currentFileIndex != 0 && hInfo.ObjectTypeIndex != currentFileIndex) continue;
+
+                    IntPtr dupHandle = IntPtr.Zero;
+                    if (DuplicateHandle(hProcess, hInfo.HandleValue, currentProcessHandle, out dupHandle, 0, false, DUPLICATE_SAME_ACCESS)) {
                         try {
-                            if ((File.GetAttributes(sub) & FileAttributes.ReparsePoint) == 0) {
-                                Interlocked.Increment(ref activeWorkers);
-                                string safeSub = sub; 
-                                bool queued = false;
-                                
-                                try {
-                                    queued = ThreadPool.QueueUserWorkItem(delegate { ProcessDirectory(safeSub); });
-                                } finally {
-                                    // Extreme Stability: If threadpool rejects, immediately decrement to prevent deadlocks
-                                    if (!queued) {
-                                        if (Interlocked.Decrement(ref activeWorkers) == 0) tcs.TrySetResult(true);
+                            if (currentFileIndex == 0) {
+                                if (GetObjectTypeName(dupHandle) == "File") {
+                                    lock (lockObj) {
+                                        if (expectedFileTypeIndex == 0) expectedFileTypeIndex = hInfo.ObjectTypeIndex;
+                                    }
+                                } else {
+                                    continue;
+                                }
+                            }
+
+                            if (GetFileType(dupHandle) == FILE_TYPE_DISK) {
+                                string objName = GetObjectName(dupHandle);
+                                if (!string.IsNullOrEmpty(objName)) {
+                                    
+                                    bool match = isDir ? 
+                                        (objName.StartsWith(devicePathWithSlash, StringComparison.OrdinalIgnoreCase) || objName.Equals(targetDevicePath, StringComparison.OrdinalIgnoreCase)) :
+                                        objName.Equals(targetDevicePath, StringComparison.OrdinalIgnoreCase);
+
+                                    if (match) {
+                                        // 3. Resolve exact DOS path for the match
+                                        string dosPath = targetPath;
+                                        if (objName.StartsWith(devicePathWithSlash, StringComparison.OrdinalIgnoreCase)) {
+                                            dosPath = targetPath.TrimEnd('\\', '/') + "\\" + objName.Substring(devicePathWithSlash.Length);
+                                        } else if (objName.Equals(targetDevicePath, StringComparison.OrdinalIgnoreCase)) {
+                                            dosPath = targetPath.TrimEnd('\\', '/');
+                                        }
+
+                                        // 4. STRICT VALIDATION: Make sure it's a real lock!
+                                        bool isStrictlyLocked = pathLockCache.GetOrAdd(dosPath, p => IsPathStrictlyLocked(p));
+
+                                        if (isStrictlyLocked) {
+                                            lock (lockObj) {
+                                                if (addedPids.Add(pid)) {
+                                                    finalLockingProcesses.Add(new ProcessItem {
+                                                        Pid = pid,
+                                                        Name = GetProcessName(pid),
+                                                        Path = GetProcessPath(pid) ?? "Unknown (Protected/Elevated)"
+                                                    });
+                                                }
+                                            }
+                                            break; // Found one valid lock for this PID, skip the rest of its handles
+                                        }
                                     }
                                 }
                             }
-                        } catch { } // Ignore locked sub-folders
-                    }
-                } catch { } 
-                finally {
-                    if (Interlocked.Decrement(ref activeWorkers) == 0) {
-                        tcs.TrySetResult(true);
+                        } finally {
+                            CloseHandle(dupHandle);
+                        }
                     }
                 }
-            };
-
-            // Kick off the multi-threaded blitz
-            ProcessDirectory(path);
-            tcs.Task.Wait(); // Safely wait
-            isScanning = false; // Kill heartbeat monitor
-
-        } else if (File.Exists(path)) {
-            if (IsPathLockedFast(path, false)) lockedPaths.Add(path);
-        }
-
-        progressCallback(75);
-
-        // Tier 3: Resolve PIDs using Restart Manager on Confirmed Locked files
-        var lockedArray = lockedPaths.ToArray();
-        if (lockedArray.Length > 0) {
-            // Smaller chunk size (200) strictly prevents API memory overload in RM
-            int chunkSize = 200; 
-            int totalChunks = (lockedArray.Length + chunkSize - 1) / chunkSize;
-
-            for (int i = 0; i < totalChunks; i++) {
-                var chunk = new List<string>();
-                for (int j = i * chunkSize; j < Math.Min((i + 1) * chunkSize, lockedArray.Length); j++) {
-                    chunk.Add(lockedArray[j]);
-                }
-
-                var rmPids = GetProcessesLockingFiles(chunk.ToArray());
-                
-                foreach (int pid in rmPids) {
-                    if (addedPids.Add(pid)) {
-                        finalLockingProcesses.Add(new ProcessItem {
-                            Pid = pid,
-                            Name = GetProcessName(pid),
-                            Path = GetProcessPath(pid) ?? "Unknown (Protected/Elevated)"
-                        });
-                    }
-                }
-                
-                int progress = 75 + (int)(((i + 1) / (double)totalChunks) * 20); // Scales 75 -> 95
-                progressCallback(progress);
+            } catch {
+            } finally {
+                CloseHandle(hProcess);
             }
-        }
+        });
 
         progressCallback(100);
         return finalLockingProcesses;
     }
 
-    public static bool IsFileLockedHeuristic(string filePath) {
-        return IsPathLockedFast(filePath, false);
-    }
-
-    public static List<int> GetProcessesLockingFiles(string[] paths) {
-        var pids = new List<int>();
-        if (paths == null || paths.Length == 0) return pids;
-
-        var validPaths = new List<string>(paths.Length);
-        foreach (string p in paths) {
-            try {
-                if (File.Exists(p) || Directory.Exists(p)) validPaths.Add(p);
-            } catch { }
-        }
-        if (validPaths.Count == 0) return pids;
-
-        uint handle;
-        string key = Guid.NewGuid().ToString();
-        int res = RmStartSession(out handle, 0, key);
-        if (res != 0) return pids;
-
+    private static string GetObjectName(IntPtr handle) {
+        int length = 1024;
+        IntPtr buffer = Marshal.AllocHGlobal(length);
         try {
-            string[] pathArray = validPaths.ToArray();
-            res = RmRegisterResources(handle, (uint)pathArray.Length, pathArray, 0, null, 0, null);
-            
-            if (res == 5) { // ERROR_ACCESS_DENIED fallback loop
-                RmEndSession(handle);
-                
-                var filesOnly = new List<string>();
-                foreach (string p in validPaths) {
-                    try {
-                        if (File.Exists(p)) filesOnly.Add(p);
-                    } catch { }
-                }
-                
-                if (filesOnly.Count == 0) return pids;
-                
-                res = RmStartSession(out handle, 0, Guid.NewGuid().ToString());
-                if (res != 0) return pids;
-                
-                pathArray = filesOnly.ToArray();
-                res = RmRegisterResources(handle, (uint)pathArray.Length, pathArray, 0, null, 0, null);
+            int status = NtQueryObject(handle, 1, buffer, length, ref length); // 1 = ObjectNameInformation
+            if (status == unchecked((int)0xC0000004) || status == unchecked((int)0x80000005)) { 
+                Marshal.FreeHGlobal(buffer);
+                buffer = Marshal.AllocHGlobal(length);
+                status = NtQueryObject(handle, 1, buffer, length, ref length);
             }
-
-            if (res != 0) return pids;
-
-            uint pnProcInfoNeeded = 0;
-            uint pnProcInfo = 0;
-            uint lpdwRebootReasons = 0;
-
-            res = RmGetList(handle, out pnProcInfoNeeded, ref pnProcInfo, null, ref lpdwRebootReasons);
-            if (res == 234) { // ERROR_MORE_DATA 
-                RM_PROCESS_INFO[] processInfo = new RM_PROCESS_INFO[pnProcInfoNeeded];
-                pnProcInfo = pnProcInfoNeeded;
-                res = RmGetList(handle, out pnProcInfoNeeded, ref pnProcInfo, processInfo, ref lpdwRebootReasons);
-                if (res == 0) {
-                    for (int i = 0; i < pnProcInfo; i++) {
-                        pids.Add(processInfo[i].Process.dwProcessId);
+            if (status >= 0) {
+                int nameLength = Marshal.ReadInt16(buffer);
+                if (nameLength > 0) {
+                    IntPtr namePtr = Marshal.SizeOf(typeof(IntPtr)) == 8 ? Marshal.ReadIntPtr(buffer, 8) : Marshal.ReadIntPtr(buffer, 4);
+                    if (namePtr != IntPtr.Zero) {
+                        return Marshal.PtrToStringUni(namePtr, nameLength / 2);
                     }
                 }
             }
+        } catch {
         } finally {
-            RmEndSession(handle);
+            Marshal.FreeHGlobal(buffer);
         }
-        return pids;
+        return null;
+    }
+
+    private static string GetObjectTypeName(IntPtr handle) {
+        int length = 1024;
+        IntPtr buffer = Marshal.AllocHGlobal(length);
+        try {
+            int status = NtQueryObject(handle, 2, buffer, length, ref length); // 2 = ObjectTypeInformation
+            if (status == unchecked((int)0xC0000004) || status == unchecked((int)0x80000005)) {
+                Marshal.FreeHGlobal(buffer);
+                buffer = Marshal.AllocHGlobal(length);
+                status = NtQueryObject(handle, 2, buffer, length, ref length);
+            }
+            if (status >= 0) {
+                int nameLength = Marshal.ReadInt16(buffer);
+                if (nameLength > 0) {
+                    IntPtr namePtr = Marshal.SizeOf(typeof(IntPtr)) == 8 ? Marshal.ReadIntPtr(buffer, 8) : Marshal.ReadIntPtr(buffer, 4);
+                    if (namePtr != IntPtr.Zero) {
+                        return Marshal.PtrToStringUni(namePtr, nameLength / 2);
+                    }
+                }
+            }
+        } catch { 
+        } finally {
+            Marshal.FreeHGlobal(buffer);
+        }
+        return null;
     }
 
     public static void RefreshProcessSnapshot(bool force = false) {
@@ -546,7 +596,6 @@ public class UnlockerForm : Form {
             try {
                 PROCESSENTRY32 pe32 = new PROCESSENTRY32();
                 pe32.dwSize = (uint)Marshal.SizeOf(typeof(PROCESSENTRY32));
-
                 if (Process32First(hSnapshot, ref pe32)) {
                     var activePids = new HashSet<int>();
                     do {
@@ -706,11 +755,7 @@ public class UnlockerForm : Form {
     public static void Main(string[] args) {
         if (args.Length == 1 && args[0] == "[WARMUP]") {
             try {
-                string tempFile = Path.GetTempFileName();
                 RefreshProcessSnapshot(true);
-                IsFileLockedHeuristic(tempFile);
-                GetProcessesLockingFiles(new string[] { tempFile });
-                if (File.Exists(tempFile)) File.Delete(tempFile);
             } catch {}
             return;
         }
