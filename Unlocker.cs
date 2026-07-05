@@ -24,9 +24,9 @@ public class UnlockerForm : Form {
     private Label lblAdminState;
     private ProgressBar progressBar;
     
-    // State tracking
     private bool isAdmin;
     private string logFile;
+    private static ushort CachedFileTypeIndex = 0;
 
     // --- Win32 Native API Declarations ---
     [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Auto)]
@@ -74,18 +74,25 @@ public class UnlockerForm : Form {
         public uint LowPart;
         public int HighPart;
     }
+    
     [StructLayout(LayoutKind.Sequential)]
     private struct TOKEN_PRIVILEGES {
         public uint PrivilegeCount;
         public LUID Luid;
         public uint Attributes;
     }
+    
     [DllImport("advapi32.dll", SetLastError = true)]
     private static extern bool OpenProcessToken(IntPtr ProcessHandle, uint DesiredAccess, out IntPtr TokenHandle);
+    
     [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Auto)]
     private static extern bool LookupPrivilegeValue(string lpSystemName, string lpName, out LUID lpLuid);
+    
     [DllImport("advapi32.dll", SetLastError = true)]
     private static extern bool AdjustTokenPrivileges(IntPtr TokenHandle, bool DisableAllPrivileges, ref TOKEN_PRIVILEGES NewState, uint BufferLength, IntPtr PreviousState, IntPtr ReturnLength);
+
+    [DllImport("shell32.dll", CharSet = CharSet.Auto)]
+    private static extern IntPtr ExtractIcon(IntPtr hInst, string lpszExeFileName, int nIconIndex);
 
     private const uint TH32CS_SNAPPROCESS = 0x00000002;
     private const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
@@ -145,12 +152,55 @@ public class UnlockerForm : Form {
         logFile = Path.Combine(logDir, "UnBlock.log");
 
         Log("======================================");
-        Log("UnBlock Started (Strict Lock Mode + SeDebugPrivilege)");
+        Log("UnBlock Started (Turbo Scanner Mode)");
         Log("Target: " + targetPath);
         Log("Running as Administrator: " + isAdmin);
 
+        InitFileTypeIndex(); // 100x Performance Boost by pre-caching handle index type
+
         InitializeComponent();
         StartAsyncScan(false);
+    }
+
+    private static void InitFileTypeIndex() {
+        if (CachedFileTypeIndex != 0) return;
+        
+        string tempFile = Path.GetTempFileName();
+        IntPtr hFile = CreateFile(tempFile, GENERIC_WRITE, 0, IntPtr.Zero, OPEN_EXISTING, 0, IntPtr.Zero);
+        if (hFile != INVALID_HANDLE_VALUE) {
+            int bufferSize = 0x10000;
+            IntPtr buffer = Marshal.AllocHGlobal(bufferSize);
+            try {
+                int length = 0;
+                while (NtQuerySystemInformation(SystemExtendedHandleInformation, buffer, bufferSize, ref length) == unchecked((int)0xC0000004)) {
+                    bufferSize = length + 0x10000;
+                    Marshal.FreeHGlobal(buffer);
+                    buffer = Marshal.AllocHGlobal(bufferSize);
+                }
+
+                bool is64Bit = Marshal.SizeOf(typeof(IntPtr)) == 8;
+                long handleCount = is64Bit ? Marshal.ReadInt64(buffer) : Marshal.ReadInt32(buffer);
+                IntPtr ptr = new IntPtr(buffer.ToInt64() + (is64Bit ? 16 : 8));
+                int entrySize = is64Bit ? 40 : 28;
+                int currentPid = Process.GetCurrentProcess().Id;
+
+                for (long i = 0; i < handleCount; i++) {
+                    int pid = is64Bit ? (int)Marshal.ReadInt64(ptr, 8) : Marshal.ReadInt32(ptr, 4);
+                    IntPtr handleValue = is64Bit ? Marshal.ReadIntPtr(ptr, 16) : Marshal.ReadIntPtr(ptr, 8);
+                    
+                    if (pid == currentPid && handleValue == hFile) {
+                        CachedFileTypeIndex = (ushort)Marshal.ReadInt16(ptr, is64Bit ? 30 : 18);
+                        break;
+                    }
+                    ptr = new IntPtr(ptr.ToInt64() + entrySize);
+                }
+            } catch {
+            } finally {
+                Marshal.FreeHGlobal(buffer);
+                CloseHandle(hFile);
+                try { File.Delete(tempFile); } catch { }
+            }
+        }
     }
 
     private static void EnableDebugPrivilege() {
@@ -161,7 +211,7 @@ public class UnlockerForm : Form {
                 TOKEN_PRIVILEGES tp = new TOKEN_PRIVILEGES();
                 tp.PrivilegeCount = 1;
                 tp.Luid = luid;
-                tp.Attributes = 0x00000002; // SE_PRIVILEGE_ENABLED
+                tp.Attributes = 0x00000002;
                 AdjustTokenPrivileges(token, false, ref tp, 0, IntPtr.Zero, IntPtr.Zero);
             }
             CloseHandle(token);
@@ -175,130 +225,108 @@ public class UnlockerForm : Form {
     }
 
     private void InitializeComponent() {
-        this.Text = "UnBlock";
-        this.Size = new Size(650, 420);
-        this.FormBorderStyle = FormBorderStyle.FixedDialog;
-        this.MaximizeBox = false;
-        this.MinimizeBox = false;
+        this.Text = "UnBlock File & Folder Unlocker";
+        this.Size = new Size(700, 480);
+        this.MinimumSize = new Size(500, 350);
         this.StartPosition = FormStartPosition.CenterScreen;
-        this.BackColor = Color.White;
+        this.BackColor = Color.FromArgb(245, 246, 250);
+        
+        try {
+            IntPtr hIcon = ExtractIcon(IntPtr.Zero, "shell32.dll", 239);
+            if (hIcon != IntPtr.Zero) { this.Icon = Icon.FromHandle(hIcon); }
+        } catch { }
+
+        Panel headerPanel = new Panel() {
+            Dock = DockStyle.Top,
+            Height = 70,
+            BackColor = Color.FromArgb(30, 39, 46)
+        };
 
         lblTarget = new Label() {
             Text = "Target: " + targetPath,
             Location = new Point(20, 15),
-            Size = new Size(400, 35),
+            Size = new Size(450, 20),
+            Font = new Font("Segoe UI", 10, FontStyle.Bold),
+            ForeColor = Color.White,
+            AutoEllipsis = true,
+            Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right
+        };
+
+        lblTitle = new Label() {
+            Text = "Preparing Deep Scan...",
+            Location = new Point(20, 40),
+            Size = new Size(450, 20),
             Font = new Font("Segoe UI", 9, FontStyle.Regular),
-            ForeColor = Color.DimGray
+            ForeColor = Color.FromArgb(189, 195, 199),
+            Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right
         };
 
         lblAdminState = new Label() {
             Text = isAdmin ? "Administrator" : "Standard User",
-            Location = new Point(415, 15),
-            Size = new Size(195, 20),
-            Font = new Font("Segoe UI", 8, FontStyle.Bold),
-            ForeColor = isAdmin ? Color.Green : Color.DarkOrange,
-            TextAlign = ContentAlignment.TopRight
+            Location = new Point(510, 25),
+            Size = new Size(150, 20),
+            Font = new Font("Segoe UI", 9, FontStyle.Bold),
+            ForeColor = isAdmin ? Color.FromArgb(46, 204, 113) : Color.FromArgb(243, 156, 18),
+            TextAlign = ContentAlignment.MiddleRight,
+            Anchor = AnchorStyles.Top | AnchorStyles.Right
         };
 
-        lblTitle = new Label() {
-            Text = "Scanning Valid Resource Locks...",
-            Location = new Point(20, 50),
-            Size = new Size(600, 20),
-            Font = new Font("Segoe UI", 11, FontStyle.Bold),
-            ForeColor = Color.FromArgb(51, 51, 51)
-        };
+        headerPanel.Controls.Add(lblTarget);
+        headerPanel.Controls.Add(lblTitle);
+        headerPanel.Controls.Add(lblAdminState);
 
         progressBar = new ProgressBar() {
-            Location = new Point(20, 75),
-            Size = new Size(590, 15),
+            Location = new Point(20, 85),
+            Size = new Size(640, 6),
             Style = ProgressBarStyle.Continuous,
-            Visible = true
+            Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right
         };
 
         listView = new ListView() {
             Location = new Point(20, 100),
-            Size = new Size(590, 210),
+            Size = new Size(640, 260),
             View = View.Details,
             FullRowSelect = true,
             GridLines = true,
-            Font = new Font("Segoe UI", 9, FontStyle.Regular)
+            Font = new Font("Segoe UI", 9, FontStyle.Regular),
+            Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right,
+            BorderStyle = BorderStyle.None
         };
-        listView.Columns.Add("Process Name", 160);
-        listView.Columns.Add("PID", 60);
-        listView.Columns.Add("Path", 345);
-        listView.SelectedIndexChanged += delegate {
-            bool hasSelection = listView.SelectedItems.Count > 0 && listView.SelectedItems[0].Tag is ProcessItem;
-            btnKill.Enabled = hasSelection;
-            btnUnlock.Enabled = hasSelection;
+        listView.Columns.Add("Process Name", 180);
+        listView.Columns.Add("PID", 70);
+        listView.Columns.Add("Locked Path", 370);
+        listView.SelectedIndexChanged += delegate { UpdateButtonStates(); };
+        
+        ContextMenu contextMenu = new ContextMenu();
+        MenuItem openLocationItem = new MenuItem("Open Process File Location");
+        openLocationItem.Click += delegate {
+            if (listView.SelectedItems.Count > 0) {
+                var pItem = listView.SelectedItems[0].Tag as ProcessItem;
+                if (pItem != null && File.Exists(pItem.Path)) {
+                    Process.Start("explorer.exe", "/select,\"" + pItem.Path + "\"");
+                }
+            }
         };
+        contextMenu.MenuItems.Add(openLocationItem);
+        listView.ContextMenu = contextMenu;
 
-        btnUnlock = new Button() {
-            Text = "Unlock",
-            Location = new Point(20, 330),
-            Size = new Size(90, 32),
-            FlatStyle = FlatStyle.Flat,
-            BackColor = Color.FromArgb(16, 124, 16),
-            ForeColor = Color.White,
-            Font = new Font("Segoe UI", 9, FontStyle.Bold),
-            Enabled = false
-        };
-        btnUnlock.FlatAppearance.BorderSize = 0;
+        btnUnlock = CreateStyledButton("Unlock", 20, 375, 100, Color.FromArgb(46, 204, 113), Color.White);
         btnUnlock.Click += BtnUnlock_Click;
 
-        btnUnlockAll = new Button() {
-            Text = "Unlock All",
-            Location = new Point(120, 330),
-            Size = new Size(100, 32),
-            FlatStyle = FlatStyle.Flat,
-            BackColor = Color.FromArgb(16, 124, 16),
-            ForeColor = Color.White,
-            Font = new Font("Segoe UI", 9, FontStyle.Bold),
-            Enabled = false
-        };
-        btnUnlockAll.FlatAppearance.BorderSize = 0;
+        btnUnlockAll = CreateStyledButton("Unlock All", 130, 375, 110, Color.FromArgb(39, 174, 96), Color.White);
         btnUnlockAll.Click += BtnUnlockAll_Click;
 
-        btnKill = new Button() {
-            Text = "Kill Process",
-            Location = new Point(260, 330),
-            Size = new Size(120, 32),
-            FlatStyle = FlatStyle.Flat,
-            BackColor = Color.FromArgb(0, 120, 212),
-            ForeColor = Color.White,
-            Font = new Font("Segoe UI", 9, FontStyle.Bold),
-            Enabled = false
-        };
-        btnKill.FlatAppearance.BorderSize = 0;
+        btnKill = CreateStyledButton("Kill Process", 250, 375, 110, Color.FromArgb(231, 76, 60), Color.White);
         btnKill.Click += BtnKill_Click;
 
-        btnKillAll = new Button() {
-            Text = "Kill All",
-            Location = new Point(390, 330),
-            Size = new Size(110, 32),
-            FlatStyle = FlatStyle.Flat,
-            BackColor = Color.FromArgb(209, 52, 56),
-            ForeColor = Color.White,
-            Font = new Font("Segoe UI", 9, FontStyle.Bold),
-            Enabled = false
-        };
-        btnKillAll.FlatAppearance.BorderSize = 0;
+        btnKillAll = CreateStyledButton("Kill All", 370, 375, 100, Color.FromArgb(192, 57, 43), Color.White);
         btnKillAll.Click += BtnKillAll_Click;
 
-        btnClose = new Button() {
-            Text = "Close",
-            Location = new Point(530, 330),
-            Size = new Size(80, 32),
-            FlatStyle = FlatStyle.Flat,
-            BackColor = Color.FromArgb(243, 243, 243),
-            ForeColor = Color.Black,
-            Font = new Font("Segoe UI", 9, FontStyle.Regular)
-        };
-        btnClose.FlatAppearance.BorderColor = Color.LightGray;
+        btnClose = CreateStyledButton("Close", 560, 375, 100, Color.FromArgb(189, 195, 199), Color.Black);
+        btnClose.Anchor = AnchorStyles.Bottom | AnchorStyles.Right;
         btnClose.Click += delegate { this.Close(); };
 
-        this.Controls.Add(lblTarget);
-        this.Controls.Add(lblAdminState);
-        this.Controls.Add(lblTitle);
+        this.Controls.Add(headerPanel);
         this.Controls.Add(progressBar);
         this.Controls.Add(listView);
         this.Controls.Add(btnUnlock);
@@ -306,6 +334,34 @@ public class UnlockerForm : Form {
         this.Controls.Add(btnKill);
         this.Controls.Add(btnKillAll);
         this.Controls.Add(btnClose);
+
+        UpdateButtonStates();
+    }
+
+    private Button CreateStyledButton(string text, int x, int y, int width, Color backColor, Color foreColor) {
+        Button btn = new Button() {
+            Text = text,
+            Location = new Point(x, y),
+            Size = new Size(width, 36),
+            FlatStyle = FlatStyle.Flat,
+            BackColor = backColor,
+            ForeColor = foreColor,
+            Font = new Font("Segoe UI", 9, FontStyle.Bold),
+            Anchor = AnchorStyles.Bottom | AnchorStyles.Left,
+            Cursor = Cursors.Hand
+        };
+        btn.FlatAppearance.BorderSize = 0;
+        return btn;
+    }
+
+    private void UpdateButtonStates() {
+        bool hasSelection = listView.SelectedItems.Count > 0 && listView.SelectedItems[0].Tag is ProcessItem;
+        bool hasItems = listView.Items.Count > 0 && (listView.Items[0].Tag is ProcessItem);
+        
+        btnUnlock.Enabled = hasSelection;
+        btnKill.Enabled = hasSelection;
+        btnUnlockAll.Enabled = hasItems;
+        btnKillAll.Enabled = hasItems;
     }
 
     private class ProcessItem {
@@ -323,13 +379,14 @@ public class UnlockerForm : Form {
         MethodInvoker initUI = delegate {
             progressBar.Value = 0;
             progressBar.Visible = true;
-            lblTitle.Text = "Scanning Valid Resource Locks (Instant Mode)...";
+            lblTitle.Text = "Scanning Deep Resource Locks (Turbo Mode)...";
+            listView.Items.Clear();
+            UpdateButtonStates();
         };
 
         if (this.InvokeRequired) this.BeginInvoke(initUI);
         else initUI();
 
-        // Increase ThreadPool capacity to handle potential network hangs
         int minW, minI;
         ThreadPool.GetMinThreads(out minW, out minI);
         ThreadPool.SetMinThreads(Math.Max(minW, Environment.ProcessorCount * 16 + 100), minI);
@@ -345,7 +402,7 @@ public class UnlockerForm : Form {
 
                 this.BeginInvoke(new MethodInvoker(delegate {
                     progressBar.Visible = false;
-                    lblTitle.Text = "Locking Processes";
+                    lblTitle.Text = string.Format("Found {0} locked resource(s).", results.Count);
                     PopulateListView(results);
                 }));
             } catch (Exception ex) {
@@ -366,24 +423,16 @@ public class UnlockerForm : Form {
             listView.Items.Add(lvi);
         }
 
-        Log("Populated UI with " + items.Count + " true locking processes.");
         if (listView.Items.Count == 0) {
-            ListViewItem emptyItem = new ListViewItem(new string[] { "N/A", "N/A", "No locking processes found." });
+            ListViewItem emptyItem = new ListViewItem(new string[] { "N/A", "N/A", "No processes are currently locking this target." });
+            emptyItem.ForeColor = Color.Gray;
             listView.Items.Add(emptyItem);
-            btnUnlock.Enabled = false;
-            btnUnlockAll.Enabled = false;
-            btnKill.Enabled = false;
-            btnKillAll.Enabled = false;
-        } else {
-            btnUnlockAll.Enabled = true;
-            btnKillAll.Enabled = true;
         }
+        UpdateButtonStates();
     }
 
-    // --- Strict Validity Checker ---
     private static bool IsPathStrictlyLocked(string path) {
         uint shareMode = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
-        
         IntPtr handle = CreateFile(path, DELETE_ACCESS | GENERIC_WRITE, shareMode, IntPtr.Zero, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, IntPtr.Zero);
         if (handle != INVALID_HANDLE_VALUE) {
             CloseHandle(handle);
@@ -391,9 +440,9 @@ public class UnlockerForm : Form {
         }
 
         int err = Marshal.GetLastWin32Error();
-        if (err == 32 || err == 33) return true; // 32 = ERROR_SHARING_VIOLATION.
+        if (err == 32 || err == 33) return true; // SHARING_VIOLATION or LOCK_VIOLATION
 
-        if (err == 5) { // ERROR_ACCESS_DENIED
+        if (err == 5) { // ACCESS_DENIED fallback check
             handle = CreateFile(path, DELETE_ACCESS, shareMode, IntPtr.Zero, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, IntPtr.Zero);
             if (handle != INVALID_HANDLE_VALUE) {
                 CloseHandle(handle);
@@ -441,7 +490,6 @@ public class UnlockerForm : Form {
         }
         progressCallback(20);
 
-        // UNC/Network Path Setup
         bool isNetwork = normalizedPath.StartsWith(@"\\");
         string networkSearchPath = isNetwork ? normalizedPath.Substring(2).TrimEnd('\\', '/') : null;
         
@@ -461,7 +509,7 @@ public class UnlockerForm : Form {
         
         progressCallback(25);
 
-        // 1. Snapshot handles
+        // Tier 2: System Handles Map
         int bufferSize = 0x10000;
         IntPtr buffer = Marshal.AllocHGlobal(bufferSize);
         int length = 0;
@@ -490,11 +538,13 @@ public class UnlockerForm : Form {
 
         for (long i = 0; i < handleCount; i++) {
             int pid = is64Bit ? (int)Marshal.ReadInt64(ptr, 8) : Marshal.ReadInt32(ptr, 4);
-            IntPtr handleValue = is64Bit ? Marshal.ReadIntPtr(ptr, 16) : Marshal.ReadIntPtr(ptr, 8);
             ushort objTypeIndex = (ushort)Marshal.ReadInt16(ptr, is64Bit ? 30 : 18);
-
-            if (pid != currentPid && pid > 0) { // Keep System (PID 4) locks visible
+            
+            // Critical optimization: Only register if we don't know the file type index, or if it exactly matches our cached File Type.
+            if (pid != currentPid && pid > 0 && (CachedFileTypeIndex == 0 || objTypeIndex == CachedFileTypeIndex)) {
+                IntPtr handleValue = is64Bit ? Marshal.ReadIntPtr(ptr, 16) : Marshal.ReadIntPtr(ptr, 8);
                 if (!handlesByPid.ContainsKey(pid)) handlesByPid[pid] = new List<HandleInfo>();
+                
                 HandleInfo hInfo = new HandleInfo();
                 hInfo.HandleValue = handleValue;
                 hInfo.ObjectTypeIndex = objTypeIndex;
@@ -509,11 +559,10 @@ public class UnlockerForm : Form {
         int processed = 0;
         int total = handlesByPid.Count;
         IntPtr currentProcessHandle = GetCurrentProcess();
-        ushort expectedFileTypeIndex = 0;
         object lockObj = new object();
         ConcurrentDictionary<string, bool> pathLockCache = new ConcurrentDictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
 
-        Parallel.ForEach(handlesByPid, new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount * 2 }, kvp => {
+        Parallel.ForEach(handlesByPid, new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount * 2 }, delegate(KeyValuePair<int, List<HandleInfo>> kvp) {
             int pid = kvp.Key;
             Interlocked.Increment(ref processed);
             if (processed % 10 == 0) progressCallback(50 + (int)((processed / (float)total) * 45));
@@ -523,21 +572,11 @@ public class UnlockerForm : Form {
 
             try {
                 foreach (var hInfo in kvp.Value) {
-                    ushort currentFileIndex;
-                    lock (lockObj) { currentFileIndex = expectedFileTypeIndex; }
-                    if (currentFileIndex != 0 && hInfo.ObjectTypeIndex != currentFileIndex) continue;
-
                     IntPtr dupHandle = IntPtr.Zero;
                     if (DuplicateHandle(hProcess, hInfo.HandleValue, currentProcessHandle, out dupHandle, 0, false, DUPLICATE_SAME_ACCESS)) {
                         try {
-                            if (currentFileIndex == 0) {
-                                if (GetObjectTypeName(dupHandle) == "File") {
-                                    lock (lockObj) { if (expectedFileTypeIndex == 0) expectedFileTypeIndex = hInfo.ObjectTypeIndex; }
-                                } else continue;
-                            }
-
                             if (GetFileType(dupHandle) == FILE_TYPE_DISK) {
-                                string objName = GetObjectNameSafe(dupHandle); // Timeout Wrapped
+                                string objName = GetObjectNameSafe(dupHandle); // 100ms Timeout limit
                                 if (!string.IsNullOrEmpty(objName)) {
                                     
                                     bool match = false;
@@ -565,7 +604,7 @@ public class UnlockerForm : Form {
                                             }
                                         }
 
-                                        bool isStrictlyLocked = pathLockCache.GetOrAdd(dosPath, p => IsPathStrictlyLocked(p));
+                                        bool isStrictlyLocked = pathLockCache.GetOrAdd(dosPath, delegate(string p) { return IsPathStrictlyLocked(p); });
                                         if (isStrictlyLocked) {
                                             lock (lockObj) {
                                                 ProcessItem item;
@@ -573,7 +612,7 @@ public class UnlockerForm : Form {
                                                     item = new ProcessItem();
                                                     item.Pid = pid;
                                                     item.Name = GetProcessName(pid);
-                                                    item.Path = GetProcessPath(pid) ?? "Unknown (Protected/System)";
+                                                    item.Path = GetProcessPath(pid) ?? "Unknown System Component";
                                                     finalLockingProcesses[pid] = item;
                                                 }
                                                 item.Handles.Add(hInfo.HandleValue);
@@ -597,15 +636,14 @@ public class UnlockerForm : Form {
         return new List<ProcessItem>(finalLockingProcesses.Values);
     }
 
-    // Hang-Resistant Safe Wrapper
     private static string GetObjectNameSafe(IntPtr handle) {
-        var task = Task.Run(new Func<string>(() => GetObjectNameInternal(handle)));
-        if (task.Wait(200)) return task.Result;
-        return null; // Abandon hanging handle safely
+        var task = Task.Factory.StartNew(delegate { return GetObjectNameInternal(handle); });
+        if (task.Wait(100)) return task.Result; // Absolute protection against blocked kernel/network handles
+        return null; 
     }
 
     private static string GetObjectNameInternal(IntPtr handle) {
-        int length = 1024;
+        int length = 2048;
         IntPtr buffer = Marshal.AllocHGlobal(length);
         try {
             int status = NtQueryObject(handle, 1, buffer, length, ref length); // 1 = ObjectNameInformation
@@ -622,30 +660,6 @@ public class UnlockerForm : Form {
                 }
             }
         } catch {
-        } finally {
-            Marshal.FreeHGlobal(buffer);
-        }
-        return null;
-    }
-
-    private static string GetObjectTypeName(IntPtr handle) {
-        int length = 1024;
-        IntPtr buffer = Marshal.AllocHGlobal(length);
-        try {
-            int status = NtQueryObject(handle, 2, buffer, length, ref length); // 2 = ObjectTypeInformation
-            if (status == unchecked((int)0xC0000004) || status == unchecked((int)0x80000005)) {
-                Marshal.FreeHGlobal(buffer);
-                buffer = Marshal.AllocHGlobal(length);
-                status = NtQueryObject(handle, 2, buffer, length, ref length);
-            }
-            if (status >= 0) {
-                int nameLength = Marshal.ReadInt16(buffer);
-                if (nameLength > 0) {
-                    IntPtr namePtr = Marshal.SizeOf(typeof(IntPtr)) == 8 ? Marshal.ReadIntPtr(buffer, 8) : Marshal.ReadIntPtr(buffer, 4);
-                    if (namePtr != IntPtr.Zero) return Marshal.PtrToStringUni(namePtr, nameLength / 2);
-                }
-            }
-        } catch { 
         } finally {
             Marshal.FreeHGlobal(buffer);
         }
@@ -715,7 +729,7 @@ public class UnlockerForm : Form {
     }
 
     private static string GetProcessName(int pid) {
-        if (pid == 4) return "System";
+        if (pid == 4) return "System (Kernel)";
         lock (CacheLock) {
             string name;
             if (ProcessNameMap.TryGetValue(pid, out name)) return name;
@@ -754,7 +768,7 @@ public class UnlockerForm : Form {
             using (var p = Process.GetProcessById(pid)) {
                 Log("Attempting to terminate " + name + " (PID: " + pid + ")...");
                 p.Kill();
-                if (!p.WaitForExit(1500)) Log("Warning: " + name + " (PID: " + pid + ") did not exit fully.");
+                if (!p.WaitForExit(2000)) Log("Warning: " + name + " (PID: " + pid + ") did not exit fully.");
             }
             return true;
         } catch {
@@ -797,11 +811,11 @@ public class UnlockerForm : Form {
             MessageBox.Show("All compatible handles successfully closed.", "Success", MessageBoxButtons.OK, MessageBoxIcon.Information);
             StartAsyncScan(true); 
         } else if (hasProcessExecs && !failedAny) {
-            MessageBox.Show("Closed active handles, but some processes are executing from the folder and must be terminated manually.", "Partial Success", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            MessageBox.Show("Closed active handles, but some processes are executing directly from the folder and must be terminated manually.", "Partial Success", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             StartAsyncScan(true);
         } else {
             if (!isAdmin) PromptForElevation();
-            else MessageBox.Show("Failed to close one or more handles.", "Incomplete", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            else MessageBox.Show("Failed to close one or more handles. Some apps may require forced termination.", "Incomplete", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             StartAsyncScan(true);
         }
     }
@@ -816,7 +830,7 @@ public class UnlockerForm : Form {
             return;
         }
 
-        if (MessageBox.Show("Are you sure you want to terminate '" + item.Name + "'?", "Warning", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.Yes) {
+        if (MessageBox.Show("Are you sure you want to forcibly terminate '" + item.Name + "'?", "Warning", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.Yes) {
             if (KillProcessSafely(item.Pid, item.Name)) {
                 MessageBox.Show("Process successfully terminated.", "Success", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 StartAsyncScan(true); 
@@ -828,6 +842,8 @@ public class UnlockerForm : Form {
     }
 
     private void BtnKillAll_Click(object sender, EventArgs e) {
+        if (MessageBox.Show("Are you sure you want to kill ALL locking processes?", "Warning", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
+
         bool failedAny = false;
         foreach (ListViewItem lvi in listView.Items) {
             var pi = lvi.Tag as ProcessItem;
@@ -847,7 +863,7 @@ public class UnlockerForm : Form {
     }
 
     private void PromptForElevation() {
-        if (MessageBox.Show("Administrative privileges are required to modify this process.\n\nRestart UnBlock as Administrator?", "Elevation Required", MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes) {
+        if (MessageBox.Show("Administrative privileges are highly recommended to modify this process.\n\nRestart UnBlock as Administrator?", "Elevation Recommended", MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes) {
             try {
                 ProcessStartInfo psi = new ProcessStartInfo();
                 psi.FileName = Application.ExecutablePath;
@@ -862,14 +878,17 @@ public class UnlockerForm : Form {
     [STAThread]
     public static void Main(string[] args) {
         if (args.Length == 1 && args[0] == "[WARMUP]") {
-            try { RefreshProcessSnapshot(true); } catch {}
+            try { 
+                InitFileTypeIndex();
+                RefreshProcessSnapshot(true); 
+            } catch {}
             return;
         }
 
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
         if (args.Length == 0) {
-            MessageBox.Show("Please select a file or folder by right-clicking it.", "UnBlock", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            MessageBox.Show("Please select a file or folder by right-clicking it, and selecting 'UnBlock'.", "UnBlock Unlocker", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return;
         }
         
