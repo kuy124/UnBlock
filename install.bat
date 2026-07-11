@@ -65,7 +65,7 @@ Write-Host "[*] Warming up process caches..."
 Start-Process -FilePath $ExePath -ArgumentList "[WARMUP]" -WindowStyle Hidden -Wait
 
 # Write Uninstaller script to the install directory
-# Using a double-quoted string here so $InstallDir is strictly resolved during installation!
+# Saved as Ascii to maximize compatibility and avoid Byte Order Mark (BOM) issues.
 $UninstallerCode = @"
 @echo off
 :: Polished Uninstaller for UnBlock
@@ -105,7 +105,7 @@ powershell -NoProfile -WindowStyle Hidden -Command "Start-Process -FilePath 'cmd
 exit /b
 "@
 
-Set-Content -Path $UninstallerPath -Value $UninstallerCode -Encoding UTF8 -Force
+Set-Content -Path $UninstallerPath -Value $UninstallerCode -Encoding Ascii -Force
 
 # =========================================================================
 # HARDENED REGISTRY SETUP
@@ -113,7 +113,7 @@ Set-Content -Path $UninstallerPath -Value $UninstallerCode -Encoding UTF8 -Force
 Write-Host "[*] Registering Context Menus..."
 $baseKey = [Microsoft.Win32.Registry]::LocalMachine
 
-# 1. Right Click -> Files
+# 1. Right Click -> Files (Pointed directly to the engine, avoiding VBS)
 $keyFile = $baseKey.CreateSubKey("SOFTWARE\Classes\*\shell\UnBlock")
 $keyFile.SetValue("", "UnBlock")
 $keyFile.SetValue("Icon", "shell32.dll,239")
@@ -147,8 +147,8 @@ $uninstallKey.SetValue("NoModify", [int]1, [Microsoft.Win32.RegistryValueKind]::
 $uninstallKey.SetValue("NoRepair", [int]1, [Microsoft.Win32.RegistryValueKind]::DWord)
 
 # 5. Scheduled Task for Manual Deletion Cleanup (UnBlock-Cleanup)
+# Sweeps all registry entries on logon if the C:\Program Files\UnBlock folder is deleted manually
 Write-Host "[*] Registering self-cleaning maintenance task..."
-# Single quotes inside the Command avoid complex cmd line quote escape issues
 $cleanupCommand = "powershell.exe -NoProfile -WindowStyle Hidden -Command `"if (-not (Test-Path '$ExePath')) { reg delete 'HKLM\SOFTWARE\Classes\*\shell\UnBlock' /f; reg delete 'HKLM\SOFTWARE\Classes\Directory\shell\UnBlock' /f; reg delete 'HKLM\SOFTWARE\Classes\Directory\Background\shell\UnBlock' /f; reg delete 'HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\UnBlock' /f; schtasks /delete /tn 'UnBlock-Cleanup' /f }`""
 
 # Register the hidden task to check path and clean registry at user logon as SYSTEM
