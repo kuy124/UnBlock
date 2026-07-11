@@ -89,9 +89,13 @@ if %errorLevel% neq 0 exit /b
 
 :: Fast execution pipeline
 taskkill /f /im Unlocker.exe >nul 2>&1
+taskkill /f /im UnBlockWatcher.exe >nul 2>&1
 
 :: Clean up the automated maintenance task
 schtasks /delete /tn "UnBlock-Cleanup" /f >nul 2>&1
+
+:: Delete the background launcher script from LocalAppData
+if exist "%LocalAppData%\UnBlock" rmdir /s /q "%LocalAppData%\UnBlock" >nul 2>&1
 
 reg delete "HKLM\SOFTWARE\Classes\*\shell\UnBlock" /f >nul 2>&1
 reg delete "HKLM\SOFTWARE\Classes\Directory\shell\UnBlock" /f >nul 2>&1
@@ -113,7 +117,7 @@ Set-Content -Path $UninstallerPath -Value $UninstallerCode -Encoding Ascii -Forc
 Write-Host "[*] Registering Context Menus..."
 $baseKey = [Microsoft.Win32.Registry]::LocalMachine
 
-# 1. Right Click -> Files (Pointed directly to the engine, avoiding VBS)
+# 1. Right Click -> Files (Points directly to engine, eliminating VBS scripts entirely)
 $keyFile = $baseKey.CreateSubKey("SOFTWARE\Classes\*\shell\UnBlock")
 $keyFile.SetValue("", "UnBlock")
 $keyFile.SetValue("Icon", "shell32.dll,239")
@@ -146,13 +150,23 @@ $uninstallKey.SetValue("DisplayIcon", "`"$ExePath`"")
 $uninstallKey.SetValue("NoModify", [int]1, [Microsoft.Win32.RegistryValueKind]::DWord)
 $uninstallKey.SetValue("NoRepair", [int]1, [Microsoft.Win32.RegistryValueKind]::DWord)
 
-# 5. Scheduled Task for Manual Deletion Cleanup (UnBlock-Cleanup)
-# Sweeps all registry entries on logon if the C:\Program Files\UnBlock folder is deleted manually
-Write-Host "[*] Registering self-cleaning maintenance task..."
-$cleanupCommand = "powershell.exe -NoProfile -WindowStyle Hidden -Command `"if (-not (Test-Path '$ExePath')) { reg delete 'HKLM\SOFTWARE\Classes\*\shell\UnBlock' /f; reg delete 'HKLM\SOFTWARE\Classes\Directory\shell\UnBlock' /f; reg delete 'HKLM\SOFTWARE\Classes\Directory\Background\shell\UnBlock' /f; reg delete 'HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\UnBlock' /f; schtasks /delete /tn 'UnBlock-Cleanup' /f }`""
+# =========================================================================
+# DYNAMIC WATCHER SETUP (NO FILE-USE LOCKS, NO CONSOLE FLASHES)
+# =========================================================================
+Write-Host "[*] Deploying dynamic background watcher..."
+$LocalDir = Join-Path $env:LocalAppData "UnBlock"
+if (-not (Test-Path $LocalDir)) {
+    New-Item -ItemType Directory -Path $LocalDir -Force | Out-Null
+}
+$WatcherExe = Join-Path $LocalDir "UnBlockWatcher.exe"
+Copy-Item -Path $ExePath -Destination $WatcherExe -Force
 
-# Register the hidden task to check path and clean registry at user logon as SYSTEM
+# Register the hidden task to run the watcher in Session 0 (completely hidden background)
+$cleanupCommand = "`"$WatcherExe`" [WATCHER] `"$InstallDir`""
 Start-Process -FilePath "schtasks" -ArgumentList "/create /tn `"UnBlock-Cleanup`" /sc ONLOGON /ru `"SYSTEM`" /rl HIGHEST /tr `"$cleanupCommand`" /f" -WindowStyle Hidden -Wait
+
+# Fire the watcher immediately so it is active without requiring a logoff/restart
+Start-Process -FilePath "schtasks" -ArgumentList "/run /tn `"UnBlock-Cleanup`"" -WindowStyle Hidden -Wait
 
 [System.Windows.Forms.MessageBox]::Show("UnBlock was installed successfully!`n`nYou can now Right-Click on any locked file or folder to unlock it.`n`nInstalled to:`n$InstallDir", "Setup Complete", "OK", "Information")
 ##POWERSHELL_END##

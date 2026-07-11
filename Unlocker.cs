@@ -1290,6 +1290,39 @@ public class UnlockerForm : Form {
         base.OnFormClosed(e);
     }
 
+    private static void RunWatcherMode(string targetDir) {
+        // Safe 2-second interval polling loop running as hidden SYSTEM task.
+        // Triggers instant native cleanup the moment the Program Files folder disappears.
+        string targetExe = Path.Combine(targetDir, "Unlocker.exe");
+        while (true) {
+            Thread.Sleep(2000);
+            if (!Directory.Exists(targetDir) || !File.Exists(targetExe)) {
+                CleanRegistryAndSelf();
+                break;
+            }
+        }
+    }
+
+    private static void CleanRegistryAndSelf() {
+        try {
+            // Clean registry keys natively using Windows Base APIs
+            using (var baseKey = Microsoft.Win32.RegistryKey.OpenBaseKey(Microsoft.Win32.RegistryHive.LocalMachine, Microsoft.Win32.RegistryView.Registry64)) {
+                baseKey.DeleteSubKeyTree(@"SOFTWARE\Classes\*\shell\UnBlock", false);
+                baseKey.DeleteSubKeyTree(@"SOFTWARE\Classes\Directory\shell\UnBlock", false);
+                baseKey.DeleteSubKeyTree(@"SOFTWARE\Classes\Directory\Background\shell\UnBlock", false);
+                baseKey.DeleteSubKeyTree(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\UnBlock", false);
+            }
+        } catch { }
+
+        // Terminate the maintenance task scheduler entry cleanly
+        try {
+            ProcessStartInfo psi = new ProcessStartInfo("schtasks", "/delete /tn \"UnBlock-Cleanup\" /f");
+            psi.WindowStyle = ProcessWindowStyle.Hidden;
+            psi.CreateNoWindow = true;
+            Process.Start(psi);
+        } catch { }
+    }
+
     [STAThread]
     public static void Main(string[] args) {
         if (args.Length == 1 && args[0] == "[WARMUP]") {
@@ -1297,6 +1330,12 @@ public class UnlockerForm : Form {
                 InitFileTypeIndex();
                 RefreshProcessSnapshot(true); 
             } catch {}
+            return;
+        }
+
+        // --- DYNAMIC BACKGROUND WATCHER BOOTSTRAP ---
+        if (args.Length >= 2 && args[0] == "[WATCHER]") {
+            RunWatcherMode(args[1]);
             return;
         }
 
