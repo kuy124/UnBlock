@@ -69,44 +69,36 @@ Start-Process -FilePath $ExePath -ArgumentList "[WARMUP]" -WindowStyle Hidden -W
 $UninstallerCode = @"
 @echo off
 :: Polished Uninstaller for UnBlock
-color 0F
-echo =========================================
-echo      UnBlock Uninstallation Utility
-echo =========================================
-echo.
 
 :: Check for Admin Privileges
 net session >nul 2>&1
 if %errorLevel% neq 0 (
-    echo [!] Requesting Administrator privileges...
-    powershell -STA -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath '%~f0' -Verb RunAs"
+    powershell -NoProfile -WindowStyle Hidden -Command "Start-Process -FilePath '%~f0' -ArgumentList '-silent' -Verb RunAs"
+    exit /b
+)
+
+:: Relaunch with hidden console if not already running silently
+if "%~1" neq "-silent" (
+    powershell -NoProfile -WindowStyle Hidden -Command "Start-Process -FilePath '%~f0' -ArgumentList '-silent'"
     exit /b
 )
 
 :: Prompt user with a GUI confirmation message box
-powershell -NoProfile -Command "Add-Type -AssemblyName System.Windows.Forms; if ([System.Windows.Forms.MessageBox]::Show('Are you sure you want to completely remove UnBlock and all of its components from your computer?', 'Uninstall UnBlock', 'YesNo', 'Question') -eq 'No') { exit 1 }"
-if %errorLevel% neq 0 (
-    echo Uninstall cancelled by user.
-    exit /b
-)
+powershell -NoProfile -Command "Add-Type -AssemblyName System.Windows.Forms; if ([System.Windows.Forms.MessageBox]::Show('Are you sure you want to completely remove UnBlock and all of its components?', 'Uninstall UnBlock', 'YesNo', 'Question') -eq 'No') { exit 1 }"
+if %errorLevel% neq 0 exit /b
 
-echo [*] Terminating any active UnBlock processes...
+:: Fast execution pipeline
 taskkill /f /im Unlocker.exe >nul 2>&1
 
-echo [*] Removing context menu integration...
-echo --- UnBlock Uninstall Log --- > "$InstallDir\uninstall_log.txt"
-reg delete "HKLM\SOFTWARE\Classes\*\shell\UnBlock" /f >> "$InstallDir\uninstall_log.txt" 2>&1
-reg delete "HKLM\SOFTWARE\Classes\Directory\shell\UnBlock" /f >> "$InstallDir\uninstall_log.txt" 2>&1
-reg delete "HKLM\SOFTWARE\Classes\Directory\Background\shell\UnBlock" /f >> "$InstallDir\uninstall_log.txt" 2>&1
+reg delete "HKLM\SOFTWARE\Classes\*\shell\UnBlock" /f >nul 2>&1
+reg delete "HKLM\SOFTWARE\Classes\Directory\shell\UnBlock" /f >nul 2>&1
+reg delete "HKLM\SOFTWARE\Classes\Directory\Background\shell\UnBlock" /f >nul 2>&1
+reg delete "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\UnBlock" /f >nul 2>&1
 
-echo [*] Removing Add/Remove Programs registration...
-reg delete "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\UnBlock" /f >> "$InstallDir\uninstall_log.txt" 2>&1
+powershell -NoProfile -Command "Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.MessageBox]::Show('UnBlock has been successfully uninstalled.', 'Uninstall Complete', 'OK', 'Information')"
 
-echo [*] Finalizing cleanup...
-powershell -NoProfile -Command "Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.MessageBox]::Show('UnBlock has been successfully uninstalled from your computer.', 'Uninstall Complete', 'OK', 'Information')"
-
-:: Self-deletion via hidden CMD process
-powershell -NoProfile -WindowStyle Hidden -Command "Start-Process -FilePath 'cmd.exe' -ArgumentList '/c timeout /t 2 >nul & rmdir /s /q `"$InstallDir`"' -WindowStyle Hidden"
+:: Fast self-deletion via hidden CMD process
+powershell -NoProfile -WindowStyle Hidden -Command "Start-Process -FilePath 'cmd.exe' -ArgumentList '/c timeout /t 1 >nul & rmdir /s /q `"$InstallDir`"' -WindowStyle Hidden"
 exit /b
 "@
 
@@ -145,7 +137,7 @@ $uninstallKey = $baseKey.CreateSubKey("SOFTWARE\Microsoft\Windows\CurrentVersion
 $uninstallKey.SetValue("DisplayName", "UnBlock File & Folder Unlocker")
 $uninstallKey.SetValue("DisplayVersion", "2.1.0")
 $uninstallKey.SetValue("Publisher", "UnBlock")
-$uninstallKey.SetValue("UninstallString", "`"$UninstallerPath`"")
+$uninstallKey.SetValue("UninstallString", "`"$UninstallerPath`" -silent")  # Quiet launch integration
 $uninstallKey.SetValue("InstallLocation", "`"$InstallDir`"")
 $uninstallKey.SetValue("DisplayIcon", "`"$ExePath`"")
 $uninstallKey.SetValue("NoModify", [int]1, [Microsoft.Win32.RegistryValueKind]::DWord)
