@@ -285,15 +285,18 @@ public class UnlockerForm : Form {
             if (hIcon != IntPtr.Zero) { this.Icon = Icon.FromHandle(hIcon); }
         } catch { }
 
+        // Layout Fix: Explicitly initialize panel width to match the form first.
+        // This prevents the anchoring system from sliding controls off-screen during stretch operations.
         Panel headerPanel = new Panel() {
-            Dock = DockStyle.Top,
+            Width = 720, 
             Height = 80,
+            Dock = DockStyle.Top,
             BackColor = Color.FromArgb(30, 39, 46)
         };
 
         lblTarget = new Label() {
             Location = new Point(20, 15),
-            Size = new Size(380, 22),
+            Size = new Size(310, 22), // Balanced layout allocation
             Font = new Font("Segoe UI", 10, FontStyle.Bold),
             ForeColor = Color.White,
             AutoEllipsis = true,
@@ -303,16 +306,17 @@ public class UnlockerForm : Form {
         lblTitle = new Label() {
             Text = "Ready to scan.",
             Location = new Point(20, 42),
-            Size = new Size(380, 20),
+            Size = new Size(310, 20), // Balanced layout allocation
             Font = new Font("Segoe UI", 9, FontStyle.Regular),
             ForeColor = Color.FromArgb(189, 195, 199),
             Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right
         };
 
+        // Layout Scaling Fix: Shifted and widened button dimensions to prevent text truncation
         btnAddFile = new Button() {
             Text = "+ File",
-            Location = new Point(410, 22),
-            Size = new Size(60, 28),
+            Location = new Point(340, 22), 
+            Size = new Size(100, 28),     // Generous spacing prevents "+ " clipping
             FlatStyle = FlatStyle.Flat,
             BackColor = Color.FromArgb(52, 152, 219),
             ForeColor = Color.White,
@@ -326,8 +330,8 @@ public class UnlockerForm : Form {
 
         btnAddFolder = new Button() {
             Text = "+ Folder",
-            Location = new Point(475, 22),
-            Size = new Size(75, 28),
+            Location = new Point(450, 22), 
+            Size = new Size(110, 28),     // Generous spacing prevents "+ " clipping
             FlatStyle = FlatStyle.Flat,
             BackColor = Color.FromArgb(41, 128, 185),
             ForeColor = Color.White,
@@ -341,8 +345,8 @@ public class UnlockerForm : Form {
 
         lblAdminState = new Label() {
             Text = isAdmin ? "🛡️ Admin" : "⚠️ Standard User",
-            Location = new Point(560, 25),
-            Size = new Size(130, 22),
+            Location = new Point(570, 25), 
+            Size = new Size(120, 22),     
             Font = new Font("Segoe UI", 9, FontStyle.Bold),
             ForeColor = isAdmin ? Color.FromArgb(46, 204, 113) : Color.FromArgb(243, 156, 18),
             TextAlign = ContentAlignment.MiddleRight,
@@ -624,7 +628,8 @@ public class UnlockerForm : Form {
         HashSet<string> targetsSnapshot;
         lock (ipcLock) {
             if (targetPaths.Count == 0) {
-                this.BeginInvoke(new MethodInvoker(delegate {
+                // Safeguard Fix: InvokeUI updates safely without invoking BeginInvoke inside constructor execution
+                MethodInvoker updateEmptyUI = delegate {
                     progressBar.Visible = false;
                     currentScanResults.Clear();
                     listView.Items.Clear();
@@ -633,7 +638,11 @@ public class UnlockerForm : Form {
                     listView.Items.Add(emptyItem);
                     UpdateButtonStates();
                     lock (scanLock) { isScanning = false; }
-                }));
+                };
+
+                if (this.InvokeRequired) this.BeginInvoke(updateEmptyUI);
+                else updateEmptyUI();
+
                 return;
             }
             // Snapshot copy prevents collection modification issues during background tasks
@@ -1354,8 +1363,19 @@ public class UnlockerForm : Form {
         string pendingDir = Path.Combine(appData, "UnBlock\\Pending");
         Directory.CreateDirectory(pendingDir);
 
-        bool createdNew;
-        singleInstanceMutex = new Mutex(true, "Global\\UnBlock_SingleInstance_Mutex", out createdNew);
+        bool createdNew = true;
+        try {
+            singleInstanceMutex = new Mutex(true, "Global\\UnBlock_SingleInstance_Mutex", out createdNew);
+        } catch (UnauthorizedAccessException) {
+            try {
+                // Defensive Fallback Fix: Creates a Local Session Mutex if user has standard non-administrator privileges
+                singleInstanceMutex = new Mutex(true, "Local\\UnBlock_SingleInstance_Mutex", out createdNew);
+            } catch {
+                createdNew = true;
+            }
+        } catch {
+            createdNew = true;
+        }
 
         if (!createdNew) {
             // Another instance is running. Pass our target paths and terminate.
