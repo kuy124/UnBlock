@@ -90,6 +90,9 @@ if %errorLevel% neq 0 exit /b
 :: Fast execution pipeline
 taskkill /f /im Unlocker.exe >nul 2>&1
 
+:: Clean up the automated maintenance task
+schtasks /delete /tn "UnBlock-Cleanup" /f >nul 2>&1
+
 reg delete "HKLM\SOFTWARE\Classes\*\shell\UnBlock" /f >nul 2>&1
 reg delete "HKLM\SOFTWARE\Classes\Directory\shell\UnBlock" /f >nul 2>&1
 reg delete "HKLM\SOFTWARE\Classes\Directory\Background\shell\UnBlock" /f >nul 2>&1
@@ -142,6 +145,14 @@ $uninstallKey.SetValue("InstallLocation", "`"$InstallDir`"")
 $uninstallKey.SetValue("DisplayIcon", "`"$ExePath`"")
 $uninstallKey.SetValue("NoModify", [int]1, [Microsoft.Win32.RegistryValueKind]::DWord)
 $uninstallKey.SetValue("NoRepair", [int]1, [Microsoft.Win32.RegistryValueKind]::DWord)
+
+# 5. Scheduled Task for Manual Deletion Cleanup (UnBlock-Cleanup)
+Write-Host "[*] Registering self-cleaning maintenance task..."
+# Single quotes inside the Command avoid complex cmd line quote escape issues
+$cleanupCommand = "powershell.exe -NoProfile -WindowStyle Hidden -Command `"if (-not (Test-Path '$ExePath')) { reg delete 'HKLM\SOFTWARE\Classes\*\shell\UnBlock' /f; reg delete 'HKLM\SOFTWARE\Classes\Directory\shell\UnBlock' /f; reg delete 'HKLM\SOFTWARE\Classes\Directory\Background\shell\UnBlock' /f; reg delete 'HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\UnBlock' /f; schtasks /delete /tn 'UnBlock-Cleanup' /f }`""
+
+# Register the hidden task to check path and clean registry at user logon as SYSTEM
+Start-Process -FilePath "schtasks" -ArgumentList "/create /tn `"UnBlock-Cleanup`" /sc ONLOGON /ru `"SYSTEM`" /rl HIGHEST /tr `"$cleanupCommand`" /f" -WindowStyle Hidden -Wait
 
 [System.Windows.Forms.MessageBox]::Show("UnBlock was installed successfully!`n`nYou can now Right-Click on any locked file or folder to unlock it.`n`nInstalled to:`n$InstallDir", "Setup Complete", "OK", "Information")
 ##POWERSHELL_END##
