@@ -65,7 +65,6 @@ Write-Host "[*] Warming up process caches..."
 Start-Process -FilePath $ExePath -ArgumentList "[WARMUP]" -WindowStyle Hidden -Wait
 
 # Write Uninstaller script to the install directory
-# Using a double-quoted string here so $InstallDir is strictly resolved during installation!
 $UninstallerCode = @"
 @echo off
 color 0C
@@ -103,14 +102,14 @@ $baseKey = [Microsoft.Win32.Registry]::LocalMachine
 
 # 1. Right Click -> Files
 $keyFile = $baseKey.CreateSubKey("SOFTWARE\Classes\*\shell\UnBlock")
-$keyFile.SetValue("", "UnBlock File")
+$keyFile.SetValue("", "UnBlock")
 $keyFile.SetValue("Icon", "shell32.dll,239")
 $keyFileCmd = $baseKey.CreateSubKey("SOFTWARE\Classes\*\shell\UnBlock\command")
 $keyFileCmd.SetValue("", "`"$ExePath`" `"%1`"")
 
 # 2. Right Click -> Folders
 $keyDir = $baseKey.CreateSubKey("SOFTWARE\Classes\Directory\shell\UnBlock")
-$keyDir.SetValue("", "UnBlock Folder")
+$keyDir.SetValue("", "UnBlock")
 $keyDir.SetValue("Icon", "shell32.dll,239")
 $keyDirCmd = $baseKey.CreateSubKey("SOFTWARE\Classes\Directory\shell\UnBlock\command")
 $keyDirCmd.SetValue("", "`"$ExePath`" `"%1`"")
