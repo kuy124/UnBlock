@@ -43,6 +43,12 @@ public class UnlockerForm : Form {
     private readonly object ipcLock = new object();
     private readonly object scanLock = new object();
 
+    private enum Severity {
+        Low,      // Benign / Green
+        Medium,   // Active Read / Orange
+        High      // Severe Write/Delete Lockout / Red
+    }
+
     // --- Win32 Native API Declarations ---
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool SetProcessDPIAware();
@@ -697,6 +703,16 @@ public class UnlockerForm : Form {
         }
     }
 
+    private static Severity GetSeverity(string accessInfo) {
+        if (accessInfo.StartsWith("Benign")) {
+            return Severity.Low;
+        }
+        if (accessInfo.StartsWith("Active Read")) {
+            return Severity.Medium;
+        }
+        return Severity.High; // Write, delete, exclusive, full control, modify
+    }
+
     private void ApplyFilter(string filterText) {
         listView.BeginUpdate();
         listView.Items.Clear();
@@ -731,6 +747,7 @@ public class UnlockerForm : Form {
             }
 
             string accessInfo = GetAccessInfo(item.GrantedAccess, item.IsDir);
+            Severity severity = GetSeverity(accessInfo);
 
             ListViewItem lvi = new ListViewItem(new string[] { 
                 item.Name, 
@@ -741,22 +758,31 @@ public class UnlockerForm : Form {
             lvi.ImageIndex = iconIndex;
             lvi.Tag = item;
 
-            // Apply style coding directly based on access levels
+            // Apply color coding styling directly based on Severity classifications
             lvi.UseItemStyleForSubItems = false;
-            if (accessInfo.Contains("Exclusive") || accessInfo.Contains("Active Write") || accessInfo.Contains("Delete")) {
+            if (severity == Severity.High) {
+                // High Severity - Severe Lockout (Crimson Red)
                 lvi.ForeColor = Color.Black;
-                lvi.SubItems[2].ForeColor = Color.FromArgb(231, 76, 60); // Red (Severe Lockout)
+                lvi.SubItems[0].ForeColor = Color.FromArgb(44, 62, 80); // Dark slate
+                lvi.SubItems[1].ForeColor = Color.FromArgb(44, 62, 80);
+                lvi.SubItems[2].ForeColor = Color.FromArgb(192, 57, 43); // Bold Alizarin Red
                 lvi.SubItems[2].Font = new Font(listView.Font, FontStyle.Bold);
-            } else if (accessInfo.Contains("Active Read")) {
+                lvi.SubItems[3].ForeColor = Color.FromArgb(44, 62, 80);
+            } else if (severity == Severity.Medium) {
+                // Medium Severity - Active Reader (Pumpkin Orange)
                 lvi.ForeColor = Color.Black;
-                lvi.SubItems[2].ForeColor = Color.FromArgb(243, 156, 18); // Orange (Active reader)
+                lvi.SubItems[0].ForeColor = Color.FromArgb(44, 62, 80);
+                lvi.SubItems[1].ForeColor = Color.FromArgb(44, 62, 80);
+                lvi.SubItems[2].ForeColor = Color.FromArgb(211, 84, 0); // Bold Pumpkin Orange
                 lvi.SubItems[2].Font = new Font(listView.Font, FontStyle.Bold);
+                lvi.SubItems[3].ForeColor = Color.FromArgb(44, 62, 80);
             } else {
-                // Benign usage (e.g., browsing inside WinRAR or active Command Prompts)
+                // Low Severity - Benign Usage (Muted Gray & Emerald Green)
+                // Fades benign rows to immediately highlight severe blockers
                 lvi.ForeColor = Color.Gray;
                 lvi.SubItems[0].ForeColor = Color.Gray;
                 lvi.SubItems[1].ForeColor = Color.Gray;
-                lvi.SubItems[2].ForeColor = Color.FromArgb(46, 204, 113); // Green (Benign / Shared Browse)
+                lvi.SubItems[2].ForeColor = Color.FromArgb(39, 174, 96); // Soft Emerald Green
                 lvi.SubItems[2].Font = new Font(listView.Font, FontStyle.Bold);
                 lvi.SubItems[3].ForeColor = Color.Gray;
             }
