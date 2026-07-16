@@ -1300,35 +1300,72 @@ public class UnlockerForm : Form {
     }
 
     private static void RunWatcherMode(string targetDir) {
-        // Safe 2-second interval polling loop running as hidden SYSTEM task.
-        // Triggers instant native cleanup the moment the Program Files folder disappears.
         string targetExe = Path.Combine(targetDir, "Unlocker.exe");
+        bool keysCurrentlyRegistered = true; // Assume they exist when PC boots
+        
         while (true) {
-            Thread.Sleep(2000);
-            if (!Directory.Exists(targetDir) || !File.Exists(targetExe)) {
-                CleanRegistryAndSelf();
-                break;
+            Thread.Sleep(2000); // Check every 2 seconds
+            
+            bool isAppAvailable = File.Exists(targetExe);
+            
+            if (isAppAvailable && !keysCurrentlyRegistered) {
+                // The drive was plugged back in! Restore the right-click menus.
+                RestoreRegistryKeys(targetExe);
+                keysCurrentlyRegistered = true;
+            } 
+            else if (!isAppAvailable && keysCurrentlyRegistered) {
+                // The drive is unplugged. Hide the right-click menus temporarily.
+                CleanRegistryOnly();
+                keysCurrentlyRegistered = false;
             }
         }
     }
 
-    private static void CleanRegistryAndSelf() {
+    private static void CleanRegistryOnly() {
         try {
-            // Clean registry keys natively using Windows Base APIs
             using (var baseKey = Microsoft.Win32.RegistryKey.OpenBaseKey(Microsoft.Win32.RegistryHive.LocalMachine, Microsoft.Win32.RegistryView.Registry64)) {
+                // Remove right-click menus temporarily
                 baseKey.DeleteSubKeyTree(@"SOFTWARE\Classes\*\shell\UnBlock", false);
                 baseKey.DeleteSubKeyTree(@"SOFTWARE\Classes\Directory\shell\UnBlock", false);
                 baseKey.DeleteSubKeyTree(@"SOFTWARE\Classes\Directory\Background\shell\UnBlock", false);
-                baseKey.DeleteSubKeyTree(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\UnBlock", false);
+                
+                // Note: We deliberately LEAVE the "Uninstall" key alone so you can 
+                // still officially uninstall it from Windows Settings if you want to!
             }
         } catch { }
+    }
 
-        // Terminate the maintenance task scheduler entry cleanly
+    private static void RestoreRegistryKeys(string exePath) {
         try {
-            ProcessStartInfo psi = new ProcessStartInfo("schtasks", "/delete /tn \"UnBlock-Cleanup\" /f");
-            psi.WindowStyle = ProcessWindowStyle.Hidden;
-            psi.CreateNoWindow = true;
-            Process.Start(psi);
+            using (var baseKey = Microsoft.Win32.RegistryKey.OpenBaseKey(Microsoft.Win32.RegistryHive.LocalMachine, Microsoft.Win32.RegistryView.Registry64)) {
+                
+                // 1. Restore: Right Click -> Files
+                using (var k = baseKey.CreateSubKey(@"SOFTWARE\Classes\*\shell\UnBlock")) {
+                    k.SetValue("", "UnBlock");
+                    k.SetValue("Icon", "shell32.dll,239");
+                    using (var cmd = k.CreateSubKey("command")) {
+                        cmd.SetValue("", string.Format("\"{0}\" \"%1\"", exePath));
+                    }
+                }
+                
+                // 2. Restore: Right Click -> Folders
+                using (var k = baseKey.CreateSubKey(@"SOFTWARE\Classes\Directory\shell\UnBlock")) {
+                    k.SetValue("", "UnBlock");
+                    k.SetValue("Icon", "shell32.dll,239");
+                    using (var cmd = k.CreateSubKey("command")) {
+                        cmd.SetValue("", string.Format("\"{0}\" \"%1\"", exePath));
+                    }
+                }
+                
+                // 3. Restore: Right Click -> Empty Space
+                using (var k = baseKey.CreateSubKey(@"SOFTWARE\Classes\Directory\Background\shell\UnBlock")) {
+                    k.SetValue("", "UnBlock This Folder");
+                    k.SetValue("Icon", "shell32.dll,239");
+                    using (var cmd = k.CreateSubKey("command")) {
+                        cmd.SetValue("", string.Format("\"{0}\" \"%V\"", exePath));
+                    }
+                }
+            }
         } catch { }
     }
 
