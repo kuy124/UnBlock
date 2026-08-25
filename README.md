@@ -26,7 +26,7 @@ Follow these steps to set up UnBlock on your computer.
 3. Right-click the `.zip` file, select **Extract All...**, and extract the contents to a normal folder of your choice.
 
 ### Step 2: Run the Installer
-1. Open the folder where you extracted the files. You should see `install.bat` and `Unlocker.cs` sitting next to each other.
+1. Open the folder where you extracted the files. You should see `install.bat` and the `.cs` source files sitting next to each other.
 2. Right-click **`install.bat`** and select **Run as Administrator**.
 3. Choose where you want to install UnBlock (or simply press **OK** to accept the default folder: `C:\Program Files\UnBlock`).
 

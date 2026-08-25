@@ -23,12 +23,12 @@ exit /b
 ##POWERSHELL_START##
 Add-Type -AssemblyName System.Windows.Forms
 
-# Point to the Unlocker.cs file sitting next to this install.bat
-$SourceCsPath = Join-Path $InstallSourceDir "Unlocker.cs"
+# Gather every C# source file sitting next to this install.bat
+$SourceFiles = @(Get-ChildItem -LiteralPath $InstallSourceDir -Filter "*.cs" -File | Select-Object -ExpandProperty FullName)
 
 # Error Check: Make sure the user didn't separate the files
-if (-not (Test-Path $SourceCsPath)) {
-    [System.Windows.Forms.MessageBox]::Show("Could not find 'Unlocker.cs' in the installation folder.`n`nPlease make sure both install.bat and Unlocker.cs are extracted into the exact same folder before running.", "Setup Error", "OK", "Error")
+if ($SourceFiles.Count -eq 0) {
+    [System.Windows.Forms.MessageBox]::Show("Could not find any .cs source files in the installation folder.`n`nPlease make sure install.bat and all the .cs source files are extracted into the exact same folder before running.", "Setup Error", "OK", "Error")
     Exit
 }
 
@@ -50,10 +50,10 @@ if (-not (Test-Path $InstallDir)) {
     New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
 }
 
-# Compile the C# file dynamically from the source directory, and save the .exe into the installation directory
+# Compile all C# source files dynamically from the source directory, and save the .exe into the installation directory
 try {
     Write-Host "[*] Compiling UnBlock engine directly to System architecture..."
-    Add-Type -Path $SourceCsPath -OutputAssembly $ExePath -OutputType WindowsApplication -ReferencedAssemblies "System.Windows.Forms.dll", "System.Drawing.dll", "System.dll", "System.Core.dll" -ErrorAction Stop
+    Add-Type -Path $SourceFiles -OutputAssembly $ExePath -OutputType WindowsApplication -ReferencedAssemblies "System.Windows.Forms.dll", "System.Drawing.dll", "System.dll", "System.Core.dll" -ErrorAction Stop
 } catch {
     $errMsg = $_.Exception.Message
     [System.Windows.Forms.MessageBox]::Show("Compilation failed!`n`nErrors:`n$errMsg", "Setup Error", "OK", "Error")
@@ -95,7 +95,30 @@ $keyBg.SetValue("Icon", "shell32.dll,239")
 $keyBgCmd = $baseKey.CreateSubKey("SOFTWARE\Classes\Directory\Background\shell\UnBlock\command")
 $keyBgCmd.SetValue("", "`"$ExePath`" `"%V`"")
 
-# 4. Windows Add/Remove Programs (Apps & Features) Integration
+# 4. Right Click -> Drives
+$keyDrive = $baseKey.CreateSubKey("SOFTWARE\Classes\Drive\shell\UnBlock")
+$keyDrive.SetValue("", "UnBlock")
+$keyDrive.SetValue("Icon", "shell32.dll,239")
+$keyDriveCmd = $baseKey.CreateSubKey("SOFTWARE\Classes\Drive\shell\UnBlock\command")
+$keyDriveCmd.SetValue("", "`"$ExePath`" `"%1`"")
+
+# 5. Windows 11: offer to put UnBlock directly on the right-click menu.
+#    The modern Win11 menu hides classic entries behind 'Show more options';
+#    restoring the classic menu system-wide is the only reliable way to
+#    surface them without an MSIX/COM shell extension.
+if ([Environment]::OSVersion.Version.Build -ge 22000) {
+    $menuChoice = [System.Windows.Forms.MessageBox]::Show("Put UnBlock directly on the Windows 11 right-click menu?`n`nBy default, Windows 11 hides classic entries behind 'Show more options'. Choosing Yes restores the classic full right-click menu system-wide so UnBlock is always one click away.`n`n(Note: Explorer will restart once to apply.)", "Windows 11 Right-Click Menu", "YesNo", "Question")
+    if ($menuChoice -eq [System.Windows.Forms.DialogResult]::Yes) {
+        Write-Host "[*] Enabling classic right-click menu for Windows 11..."
+        New-Item -Path "HKCU:\Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\InprocServer32" -Force | Out-Null
+        New-ItemProperty -Path "HKCU:\Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\InprocServer32" -Name '(default)' -Value '' -PropertyType String -Force | Out-Null
+        New-Item -Path "HKCU:\Software\UnBlock" -Force | Out-Null
+        New-ItemProperty -Path "HKCU:\Software\UnBlock" -Name "ClassicMenu" -Value 1 -PropertyType DWord -Force | Out-Null
+        Stop-Process -Name explorer -Force
+    }
+}
+
+# 6. Windows Add/Remove Programs (Apps & Features) Integration
 Write-Host "[*] Registering with Windows Add/Remove Programs..."
 $uninstallKey = $baseKey.CreateSubKey("SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\UnBlock")
 $uninstallKey.SetValue("DisplayName", "UnBlock File & Folder Unlocker")
