@@ -10,6 +10,7 @@ using System.Drawing;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Text;
+using System.Reflection;
 
 public class UnlockerForm : Form {
     private HashSet<string> targetPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -27,9 +28,8 @@ public class UnlockerForm : Form {
     private Button btnAddFile;
     private Button btnAddFolder;
     private Label lblTarget;
-    private Label lblTitle;
     private Label lblAdminState;
-    private Label lblFilter;
+    private Label lblStatus;
     private TextBox txtFilter;
     private ProgressBar progressBar;
     private ToolTip toolTip;
@@ -42,8 +42,14 @@ public class UnlockerForm : Form {
     
     private bool isInitializing = true;
     private bool isScanning = false;
+    private bool rescanPending = false;
     private readonly object ipcLock = new object();
     private readonly object scanLock = new object();
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern IntPtr SendMessage(IntPtr hWnd, int msg, int wParam, string lParam);
+
+    private const int EM_SETCUEBANNER = 0x1501;
 
     // --- Win32 Native API Declarations ---
     [DllImport("user32.dll", SetLastError = true)]
@@ -268,128 +274,197 @@ public class UnlockerForm : Form {
 
     private void InitializeComponent() {
         this.Text = "UnBlock File & Folder Unlocker";
-        this.Size = new Size(720, 500);
-        this.MinimumSize = new Size(550, 400);
+        this.Size = new Size(830, 560);
+        this.MinimumSize = new Size(790, 480);
         this.StartPosition = FormStartPosition.CenterScreen;
-        this.BackColor = Color.FromArgb(240, 242, 245);
+        this.BackColor = Color.FromArgb(244, 246, 248);
         this.toolTip = new ToolTip();
-        
+
         try {
             IntPtr hIcon = ExtractIcon(IntPtr.Zero, "shell32.dll", 239);
             if (hIcon != IntPtr.Zero) { this.Icon = Icon.FromHandle(hIcon); }
         } catch { }
 
+        // ---------- Header ----------
         Panel headerPanel = new Panel() {
-            Width = 720, 
-            Height = 80,
             Dock = DockStyle.Top,
+            Height = 66,
+            Width = 744,
             BackColor = Color.FromArgb(30, 39, 46)
         };
 
+        Label lblAppTitle = new Label() {
+            Text = "UnBlock",
+            Location = new Point(16, 8),
+            Size = new Size(220, 26),
+            Font = new Font("Segoe UI", 12.5F, FontStyle.Bold),
+            ForeColor = Color.White
+        };
+
         lblTarget = new Label() {
-            Location = new Point(20, 15),
-            Size = new Size(310, 22), 
-            Font = new Font("Segoe UI", 10, FontStyle.Bold),
-            ForeColor = Color.White,
+            Location = new Point(18, 37),
+            Size = new Size(400, 20),
+            Font = new Font("Segoe UI", 9F, FontStyle.Regular),
+            ForeColor = Color.FromArgb(189, 195, 199),
             AutoEllipsis = true,
             Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right
         };
 
-        lblTitle = new Label() {
-            Text = "Ready to scan.",
-            Location = new Point(20, 42),
-            Size = new Size(310, 20), 
-            Font = new Font("Segoe UI", 9, FontStyle.Regular),
-            ForeColor = Color.FromArgb(189, 195, 199),
-            Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right
+        FlowLayoutPanel headerButtons = new FlowLayoutPanel() {
+            Dock = DockStyle.Right,
+            WrapContents = false,
+            BackColor = Color.FromArgb(30, 39, 46),
+            Padding = new Padding(0, 15, 14, 0)
         };
 
-        btnAddFile = new Button() {
-            Text = "+ File",
-            Location = new Point(340, 22), 
-            Size = new Size(100, 28),     
-            FlatStyle = FlatStyle.Flat,
-            BackColor = Color.FromArgb(52, 152, 219),
-            ForeColor = Color.White,
-            Font = new Font("Segoe UI", 9, FontStyle.Bold),
-            Cursor = Cursors.Hand,
-            Anchor = AnchorStyles.Top | AnchorStyles.Right
-        };
-        btnAddFile.FlatAppearance.BorderSize = 0;
+        btnAddFile = MakeHeaderButton("+ File", Color.FromArgb(52, 152, 219));
         btnAddFile.Click += BtnAddFile_Click;
-        toolTip.SetToolTip(btnAddFile, "Browse and add a file to process.");
+        toolTip.SetToolTip(btnAddFile, "Browse and add a file to analyze.");
 
-        btnAddFolder = new Button() {
-            Text = "+ Folder",
-            Location = new Point(450, 22), 
-            Size = new Size(110, 28),     
-            FlatStyle = FlatStyle.Flat,
-            BackColor = Color.FromArgb(41, 128, 185),
-            ForeColor = Color.White,
-            Font = new Font("Segoe UI", 9, FontStyle.Bold),
-            Cursor = Cursors.Hand,
-            Anchor = AnchorStyles.Top | AnchorStyles.Right
-        };
-        btnAddFolder.FlatAppearance.BorderSize = 0;
+        btnAddFolder = MakeHeaderButton("+ Folder", Color.FromArgb(41, 128, 185));
         btnAddFolder.Click += BtnAddFolder_Click;
-        toolTip.SetToolTip(btnAddFolder, "Browse and add a folder to process.");
+        toolTip.SetToolTip(btnAddFolder, "Browse and add a folder to analyze.");
 
-        lblAdminState = new Label() {
-            Text = isAdmin ? "🛡️ Admin" : "⚠️ Standard User",
-            Location = new Point(570, 15), 
-            Size = new Size(120, 22),     
-            Font = new Font("Segoe UI", 9, FontStyle.Bold),
-            ForeColor = isAdmin ? Color.FromArgb(46, 204, 113) : Color.FromArgb(243, 156, 18),
-            TextAlign = ContentAlignment.MiddleRight,
-            Anchor = AnchorStyles.Top | AnchorStyles.Right
-        };
-
-        headerPanel.Controls.Add(lblTarget);
-        headerPanel.Controls.Add(lblTitle);
-        headerPanel.Controls.Add(btnAddFile);
-        headerPanel.Controls.Add(btnAddFolder);
-        headerPanel.Controls.Add(lblAdminState);
+        headerButtons.Controls.Add(btnAddFile);
+        headerButtons.Controls.Add(btnAddFolder);
 
         if (!isAdmin) {
-            btnElevate = new Button() {
-                Text = "🛡️ Elevate",
-                Location = new Point(585, 42), 
-                Size = new Size(100, 26),     
-                FlatStyle = FlatStyle.Flat,
-                BackColor = Color.FromArgb(241, 196, 15), // Gold Yellow
-                ForeColor = Color.Black,
-                Font = new Font("Segoe UI", 8.5F, FontStyle.Bold),
-                Cursor = Cursors.Hand,
-                Anchor = AnchorStyles.Top | AnchorStyles.Right
-            };
-            btnElevate.FlatAppearance.BorderSize = 0;
+            btnElevate = MakeHeaderButton("\uD83D\uDEE1 Elevate", Color.FromArgb(241, 196, 15));
+            btnElevate.ForeColor = Color.Black;
             btnElevate.Click += BtnElevate_Click;
             toolTip.SetToolTip(btnElevate, "Restart UnBlock as Administrator to enable complete security adjustments.");
-            headerPanel.Controls.Add(btnElevate);
+            headerButtons.Controls.Add(btnElevate);
         }
 
-        lblFilter = new Label() {
-            Text = "Filter results:",
-            Location = new Point(20, 95),
-            Size = new Size(100, 20),
-            Font = new Font("Segoe UI", 9, FontStyle.Bold),
-            ForeColor = Color.DimGray,
-            TextAlign = ContentAlignment.MiddleLeft
-        };
+        int headerFlowWidth = headerButtons.Padding.Horizontal;
+        foreach (Control c in headerButtons.Controls) headerFlowWidth += c.Width + c.Margin.Horizontal;
+        headerButtons.Width = headerFlowWidth + 2;
 
+        headerPanel.Controls.Add(lblAppTitle);
+        headerPanel.Controls.Add(lblTarget);
+        headerPanel.Controls.Add(headerButtons);
+
+        // ---------- Toolbar (search + status + admin badge) ----------
+        Panel toolbarPanel = new Panel() {
+            Dock = DockStyle.Top,
+            Height = 48,
+            BackColor = Color.White
+        };
+        Panel toolbarBorder = new Panel() { Dock = DockStyle.Bottom, Height = 1, BackColor = Color.FromArgb(227, 231, 234) };
+
+        Panel filterHost = new Panel() { Dock = DockStyle.Left, Width = 276, BackColor = Color.White };
         txtFilter = new TextBox() {
-            Location = new Point(125, 94),
-            Size = new Size(220, 23),
-            Font = new Font("Segoe UI", 9, FontStyle.Regular)
+            Location = new Point(16, 12),
+            Size = new Size(250, 25),
+            Font = new Font("Segoe UI", 9F, FontStyle.Regular)
         };
         txtFilter.TextChanged += TxtFilter_TextChanged;
-        toolTip.SetToolTip(txtFilter, "Type here to dynamically filter results by Name, PID, or Path.");
+        toolTip.SetToolTip(txtFilter, "Filter results by process name, PID, or path.");
+        filterHost.Controls.Add(txtFilter);
 
+        lblStatus = new Label() {
+            Dock = DockStyle.Fill,
+            TextAlign = ContentAlignment.MiddleLeft,
+            Font = new Font("Segoe UI", 9F, FontStyle.Regular),
+            ForeColor = Color.DimGray,
+            Text = "Ready."
+        };
+        Panel statusHost = new Panel() { Dock = DockStyle.Fill, Padding = new Padding(12, 0, 8, 0) };
+        statusHost.Controls.Add(lblStatus);
+
+        lblAdminState = new Label() {
+            Text = isAdmin ? "\uD83D\uDEE1 Administrator" : "\u26A0 Standard user",
+            AutoSize = true,
+            Font = new Font("Segoe UI", 8.5F, FontStyle.Bold),
+            ForeColor = isAdmin ? Color.FromArgb(39, 174, 96) : Color.FromArgb(211, 84, 0),
+            TextAlign = ContentAlignment.MiddleRight
+        };
+        FlowLayoutPanel adminHost = new FlowLayoutPanel() {
+            Dock = DockStyle.Right,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            WrapContents = false,
+            BackColor = Color.White,
+            Padding = new Padding(0, 14, 16, 0)
+        };
+        adminHost.Controls.Add(lblAdminState);
+
+        toolbarPanel.Controls.Add(statusHost);
+        toolbarPanel.Controls.Add(adminHost);
+        toolbarPanel.Controls.Add(filterHost);
+        toolbarPanel.Controls.Add(toolbarBorder);
+
+        // ---------- Progress strip ----------
         progressBar = new ProgressBar() {
-            Location = new Point(20, 125),
-            Size = new Size(660, 5),
+            Dock = DockStyle.Top,
+            Height = 4,
             Style = ProgressBarStyle.Continuous,
-            Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right
+            Visible = false
+        };
+
+        // ---------- Action bar ----------
+        Panel actionBar = new Panel() {
+            Dock = DockStyle.Bottom,
+            Height = 62,
+            BackColor = Color.White
+        };
+        Panel actionBarBorder = new Panel() { Dock = DockStyle.Top, Height = 1, BackColor = Color.FromArgb(227, 231, 234) };
+
+        FlowLayoutPanel actionFlow = new FlowLayoutPanel() {
+            Dock = DockStyle.Fill,
+            WrapContents = false,
+            BackColor = Color.White,
+            Padding = new Padding(12, 12, 0, 0)
+        };
+
+        btnUnlock = MakeActionButton("Unlock Selected", Color.FromArgb(39, 174, 96), Color.White);
+        btnUnlock.Click += BtnUnlock_Click;
+        toolTip.SetToolTip(btnUnlock, "Close the file handle(s) held by the selected process.");
+
+        btnUnlockAll = MakeActionButton("Unlock All", Color.FromArgb(30, 132, 73), Color.White);
+        btnUnlockAll.Click += BtnUnlockAll_Click;
+        toolTip.SetToolTip(btnUnlockAll, "Close every locking handle found on the target(s).");
+
+        btnKill = MakeActionButton("Kill Process", Color.FromArgb(192, 57, 43), Color.White);
+        btnKill.Click += BtnKill_Click;
+        toolTip.SetToolTip(btnKill, "Forcibly terminate the selected locking program.");
+
+        btnKillAll = MakeActionButton("Kill All", Color.FromArgb(146, 43, 33), Color.White);
+        btnKillAll.Click += BtnKillAll_Click;
+        toolTip.SetToolTip(btnKillAll, "Forcibly terminate ALL processes shown in the list.");
+
+        btnForceDelete = MakeActionButton("Force Delete", Color.FromArgb(202, 111, 30), Color.White);
+        btnForceDelete.Click += BtnForceDelete_Click;
+        toolTip.SetToolTip(btnForceDelete, "Delete the target(s): kills locks, resets ACLs, falls back to delete-on-reboot.");
+
+        actionFlow.Controls.Add(btnUnlock);
+        actionFlow.Controls.Add(btnUnlockAll);
+        actionFlow.Controls.Add(MakeActionSeparator());
+        actionFlow.Controls.Add(btnKill);
+        actionFlow.Controls.Add(btnKillAll);
+        actionFlow.Controls.Add(MakeActionSeparator());
+        actionFlow.Controls.Add(btnForceDelete);
+
+        Panel closeHost = new Panel() {
+            Dock = DockStyle.Right,
+            Width = 96,
+            BackColor = Color.White,
+            Padding = new Padding(0, 12, 10, 12)
+        };
+        btnClose = MakeActionButton("Close", Color.FromArgb(149, 165, 166), Color.Black);
+        btnClose.Dock = DockStyle.Fill;
+        btnClose.Click += delegate { this.Close(); };
+        closeHost.Controls.Add(btnClose);
+
+        actionBar.Controls.Add(actionFlow);
+        actionBar.Controls.Add(closeHost);
+        actionBar.Controls.Add(actionBarBorder);
+
+        // ---------- Results list ----------
+        Panel listHost = new Panel() {
+            Dock = DockStyle.Fill,
+            BackColor = this.BackColor,
+            Padding = new Padding(12, 10, 12, 10)
         };
 
         imageList = new ImageList();
@@ -397,23 +472,30 @@ public class UnlockerForm : Form {
         imageList.ColorDepth = ColorDepth.Depth32Bit;
 
         listView = new ListView() {
-            Location = new Point(20, 135),
-            Size = new Size(660, 245),
+            Dock = DockStyle.Fill,
             View = View.Details,
             FullRowSelect = true,
-            GridLines = true,
-            Font = new Font("Segoe UI", 9, FontStyle.Regular),
-            Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right,
+            MultiSelect = false,
+            HideSelection = false,
+            GridLines = false,
+            Font = new Font("Segoe UI", 9F, FontStyle.Regular),
             BorderStyle = BorderStyle.FixedSingle,
             SmallImageList = imageList
         };
-        listView.Columns.Add("Process Name", 150);
-        listView.Columns.Add("PID", 60);
-        listView.Columns.Add("Access Severity", 150);
-        listView.Columns.Add("Locked Path", 280);
+        try {
+            typeof(ListView).InvokeMember("DoubleBuffered",
+                BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.SetProperty,
+                null, listView, new object[] { true });
+        } catch { }
+
+        listView.Columns.Add("Process", 175);
+        listView.Columns.Add("PID", 55);
+        listView.Columns.Add("Severity", 135);
+        listView.Columns.Add("Process Path", 300);
         listView.SelectedIndexChanged += delegate { UpdateButtonStates(); };
+        listView.ClientSizeChanged += delegate { FillLastColumn(); };
         listView.DoubleClick += ListView_DoubleClick;
-        
+
         ContextMenu contextMenu = new ContextMenu();
         MenuItem openLocationItem = new MenuItem("Open Process File Location");
         openLocationItem.Click += delegate {
@@ -427,81 +509,131 @@ public class UnlockerForm : Form {
         contextMenu.MenuItems.Add(openLocationItem);
         listView.ContextMenu = contextMenu;
 
-        btnUnlock = CreateStyledButton("Unlock Selected", 20, 395, 115, Color.FromArgb(46, 204, 113), Color.White);
-        btnUnlock.Click += BtnUnlock_Click;
-        toolTip.SetToolTip(btnUnlock, "Forcefully close the file handle owned by the selected process.");
+        listHost.Controls.Add(listView);
 
-        btnUnlockAll = CreateStyledButton("Unlock All", 145, 395, 95, Color.FromArgb(39, 174, 96), Color.White);
-        btnUnlockAll.Click += BtnUnlockAll_Click;
-        toolTip.SetToolTip(btnUnlockAll, "Close all locked active handles found in the list.");
-
-        btnKill = CreateStyledButton("Kill Process", 250, 395, 105, Color.FromArgb(231, 76, 60), Color.White);
-        btnKill.Click += BtnKill_Click;
-        toolTip.SetToolTip(btnKill, "Forcibly terminate the selected locking program.");
-
-        btnKillAll = CreateStyledButton("Kill All", 370, 395, 85, Color.FromArgb(192, 57, 43), Color.White);
-        btnKillAll.Click += BtnKillAll_Click;
-        toolTip.SetToolTip(btnKillAll, "Forcibly terminate all processes holding locking handles.");
-
-        btnForceDelete = CreateStyledButton("Force Delete", 465, 395, 120, Color.FromArgb(230, 126, 34), Color.White);
-        btnForceDelete.Click += BtnForceDelete_Click;
-        toolTip.SetToolTip(btnForceDelete, "Forcibly delete files instantly by killing locks, resetting permission ACLs, or scheduling a system-level reboot deletion.");
-
-        btnClose = CreateStyledButton("Close", 595, 395, 85, Color.FromArgb(149, 165, 166), Color.Black);
-        btnClose.Anchor = AnchorStyles.Bottom | AnchorStyles.Right;
-        btnClose.Click += delegate { this.Close(); };
-
-        this.Controls.Add(headerPanel);
-        this.Controls.Add(lblFilter);
-        this.Controls.Add(txtFilter);
+        // ---------- Assemble (reverse docking order: last added is laid out first) ----------
+        this.Controls.Add(listHost);
         this.Controls.Add(progressBar);
-        this.Controls.Add(listView);
-        this.Controls.Add(btnUnlock);
-        this.Controls.Add(btnUnlockAll);
-        this.Controls.Add(btnKill);
-        this.Controls.Add(btnKillAll);
-        this.Controls.Add(btnForceDelete);
-        this.Controls.Add(btnClose);
+        this.Controls.Add(toolbarPanel);
+        this.Controls.Add(actionBar);
+        this.Controls.Add(headerPanel);
+
+        this.CancelButton = btnClose;
+
+        try {
+            SendMessage(txtFilter.Handle, EM_SETCUEBANNER, 1, "Search process, PID or path...");
+        } catch { }
 
         UpdateButtonStates();
     }
 
-    private Button CreateStyledButton(string text, int x, int y, int width, Color backColor, Color foreColor) {
+    private Size MeasureButtonText(Button btn, string text, int paddingX, int height) {
+        int textWidth = 60;
+        try {
+            using (Graphics g = btn.CreateGraphics()) {
+                SizeF ts = g.MeasureString(text, btn.Font);
+                textWidth = (int)Math.Ceiling(ts.Width);
+            }
+        } catch { }
+        return new Size(textWidth + paddingX, height);
+    }
+
+    private Button MakeHeaderButton(string text, Color backColor) {
         Button btn = new Button() {
             Text = text,
-            Location = new Point(x, y),
-            Size = new Size(width, 36),
             FlatStyle = FlatStyle.Flat,
             BackColor = backColor,
-            ForeColor = foreColor,
-            Font = new Font("Segoe UI", 9, FontStyle.Bold),
-            Anchor = AnchorStyles.Bottom | AnchorStyles.Left,
-            Cursor = Cursors.Hand
+            ForeColor = Color.White,
+            Font = new Font("Segoe UI", 9F, FontStyle.Bold),
+            Cursor = Cursors.Hand,
+            Margin = new Padding(6, 0, 0, 0)
         };
+        btn.Size = MeasureButtonText(btn, text, 26, 34);
         btn.FlatAppearance.BorderSize = 0;
         return btn;
     }
 
+    private Button MakeActionButton(string text, Color backColor, Color foreColor) {
+        Button btn = new Button() {
+            Text = text,
+            FlatStyle = FlatStyle.Flat,
+            BackColor = backColor,
+            ForeColor = foreColor,
+            Font = new Font("Segoe UI", 9F, FontStyle.Bold),
+            Cursor = Cursors.Hand,
+            Margin = new Padding(0, 0, 6, 0)
+        };
+        btn.Size = MeasureButtonText(btn, text, 30, 40);
+        btn.FlatAppearance.BorderSize = 0;
+        btn.FlatAppearance.MouseOverBackColor = ControlPaint.Dark(backColor, 0.05f);
+        btn.EnabledChanged += delegate {
+            btn.BackColor = btn.Enabled ? backColor : Color.FromArgb(189, 195, 199);
+            btn.ForeColor = btn.Enabled ? foreColor : Color.FromArgb(120, 125, 130);
+        };
+        return btn;
+    }
+
+    private Panel MakeActionSeparator() {
+        return new Panel() {
+            Width = 1,
+            Height = 28,
+            BackColor = Color.FromArgb(208, 213, 217),
+            Margin = new Padding(7, 6, 7, 0)
+        };
+    }
+
+    private void FillLastColumn() {
+        if (listView.Columns.Count < 4 || listView.Width == 0) return;
+        int others = 0;
+        for (int i = 0; i < listView.Columns.Count - 1; i++) others += listView.Columns[i].Width;
+        int remaining = listView.ClientSize.Width - others - SystemInformation.VerticalScrollBarWidth;
+        if (remaining > 80) listView.Columns[listView.Columns.Count - 1].Width = remaining;
+    }
+
+    private void SetStatus(string text) {
+        SetStatus(text, Color.DimGray);
+    }
+
+    private void SetStatus(string text, Color color) {
+        if (lblStatus == null) return;
+        lblStatus.Text = text;
+        lblStatus.ForeColor = color;
+    }
+
+    private void ShowListMessage(string message) {
+        listView.BeginUpdate();
+        listView.Items.Clear();
+        ListViewItem emptyItem = new ListViewItem(new string[] { "", "", "", message });
+        emptyItem.ForeColor = Color.Gray;
+        listView.Items.Add(emptyItem);
+        listView.EndUpdate();
+    }
+
     private void UpdateButtonStates() {
+        bool scanning;
+        lock (scanLock) { scanning = isScanning; }
+
         bool hasSelection = listView.SelectedItems.Count > 0 && listView.SelectedItems[0].Tag is ProcessItem;
-        bool hasItems = currentScanResults.Count > 0;
-        
+        bool hasItems = currentScanResults.Count > 0 && !scanning;
+        hasSelection = hasSelection && !scanning;
+
         btnUnlock.Enabled = hasSelection;
         btnKill.Enabled = hasSelection;
         btnUnlockAll.Enabled = hasItems;
         btnKillAll.Enabled = hasItems;
+        btnForceDelete.Enabled = targetPaths.Count > 0 && !scanning;
     }
 
     private void UpdateTargetLabel() {
         if (targetPaths.Count == 0) {
-            lblTarget.Text = "Target: [No files/folders selected]";
-            lblTitle.Text = "Awaiting manual selection. Use '+ File' or '+ Folder' above.";
+            lblTarget.Text = "No files or folders selected";
+            SetStatus("Add a file or folder to begin.");
         } else if (targetPaths.Count == 1) {
             string singlePath = "";
             foreach (var p in targetPaths) { singlePath = p; break; }
-            lblTarget.Text = "Target: " + singlePath;
+            lblTarget.Text = singlePath;
         } else {
-            lblTarget.Text = string.Format("Target: [Multiple Items] ({0} files/folders loaded)", targetPaths.Count);
+            lblTarget.Text = string.Format("{0} items queued for analysis", targetPaths.Count);
         }
     }
 
@@ -575,9 +707,19 @@ public class UnlockerForm : Form {
             if (addedNew) {
                 UpdateTargetLabel();
                 if (!isInitializing) {
-                    StartAsyncScan(true);
+                    RequestScan();
                 }
             }
+        }
+    }
+
+    private void RequestScan() {
+        bool scanning;
+        lock (scanLock) { scanning = isScanning; }
+        if (scanning) {
+            rescanPending = true;
+        } else {
+            StartAsyncScan(true);
         }
     }
 
@@ -590,7 +732,7 @@ public class UnlockerForm : Form {
                     targetPaths.Add(file);
                 }
                 UpdateTargetLabel();
-                StartAsyncScan(true);
+                RequestScan();
             }
         }
     }
@@ -602,7 +744,7 @@ public class UnlockerForm : Form {
             if (fbd.ShowDialog() == DialogResult.OK) {
                 targetPaths.Add(fbd.SelectedPath);
                 UpdateTargetLabel();
-                StartAsyncScan(true);
+                RequestScan();
             }
         }
     }
@@ -632,10 +774,8 @@ public class UnlockerForm : Form {
                 MethodInvoker updateEmptyUI = delegate {
                     progressBar.Visible = false;
                     currentScanResults.Clear();
-                    listView.Items.Clear();
-                    ListViewItem emptyItem = new ListViewItem(new string[] { "N/A", "N/A", "", "Click '+ File' or '+ Folder' to analyze lock states." });
-                    emptyItem.ForeColor = Color.Gray;
-                    listView.Items.Add(emptyItem);
+                    ShowListMessage("No target selected yet - right-click any file or folder in Explorer and choose UnBlock, or use '+ File' / '+ Folder' above.");
+                    SetStatus("Add a file or folder to begin.");
                     UpdateButtonStates();
                     lock (scanLock) { isScanning = false; }
                 };
@@ -651,7 +791,7 @@ public class UnlockerForm : Form {
         MethodInvoker initUI = delegate {
             progressBar.Value = 0;
             progressBar.Visible = true;
-            lblTitle.Text = "Scanning Resource Locks (Turbo Mode)...";
+            SetStatus("Scanning for locks...");
             listView.Items.Clear();
             UpdateButtonStates();
         };
@@ -674,17 +814,34 @@ public class UnlockerForm : Form {
 
                 this.BeginInvoke(new MethodInvoker(delegate {
                     progressBar.Visible = false;
-                    lblTitle.Text = string.Format("Found {0} locked resource(s).", results.Count);
+                    if (results.Count == 1) {
+                        SetStatus("1 locking process found.", Color.FromArgb(192, 57, 43));
+                    } else if (results.Count > 1) {
+                        SetStatus(string.Format("{0} locking processes found.", results.Count), Color.FromArgb(192, 57, 43));
+                    } else {
+                        SetStatus("No active locks found.", Color.FromArgb(39, 174, 96));
+                    }
                     currentScanResults = results;
                     ApplyFilter(txtFilter.Text.Trim());
                     lock (scanLock) { isScanning = false; }
+                    UpdateButtonStates();
+                    if (rescanPending) {
+                        rescanPending = false;
+                        StartAsyncScan(true);
+                    }
                 }));
             } catch (Exception ex) {
                 Log("Scan error: " + ex.Message);
                 this.BeginInvoke(new MethodInvoker(delegate {
                     progressBar.Visible = false;
+                    SetStatus("Scan failed: " + ex.Message, Color.FromArgb(192, 57, 43));
                     MessageBox.Show("Scan error: " + ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
                     lock (scanLock) { isScanning = false; }
+                    UpdateButtonStates();
+                    if (rescanPending) {
+                        rescanPending = false;
+                        StartAsyncScan(true);
+                    }
                 }));
             }
         });
@@ -815,10 +972,15 @@ public class UnlockerForm : Form {
         }
 
         if (listView.Items.Count == 0) {
-            string msg = (currentScanResults.Count == 0) ? "No active locking processes found on target(s)." : "No search matches found.";
-            ListViewItem emptyItem = new ListViewItem(new string[] { "N/A", "N/A", "", msg });
-            emptyItem.ForeColor = Color.Gray;
-            listView.Items.Add(emptyItem);
+            if (currentScanResults.Count == 0) {
+                ListViewItem emptyItem = new ListViewItem(new string[] { "", "", "", "No locking processes found - the target(s) are free to modify or delete." });
+                emptyItem.ForeColor = Color.FromArgb(39, 174, 96);
+                listView.Items.Add(emptyItem);
+            } else {
+                ListViewItem emptyItem = new ListViewItem(new string[] { "", "", "", "No results match the current search." });
+                emptyItem.ForeColor = Color.Gray;
+                listView.Items.Add(emptyItem);
+            }
         }
 
         listView.EndUpdate();
@@ -1691,22 +1853,181 @@ public class UnlockerForm : Form {
 
     private static void RunWatcherMode(string targetDir) {
         string targetExe = Path.Combine(targetDir, "Unlocker.exe");
-        bool keysCurrentlyRegistered = true; 
-        
+
         while (true) {
-            Thread.Sleep(2000); 
-            
+            Thread.Sleep(1500);
+
             bool isAppAvailable = File.Exists(targetExe);
-            
+            bool keysCurrentlyRegistered = AreContextKeysRegistered();
+
             if (isAppAvailable && !keysCurrentlyRegistered) {
                 RestoreRegistryKeys(targetExe);
-                keysCurrentlyRegistered = true;
-            } 
+            }
             else if (!isAppAvailable && keysCurrentlyRegistered) {
-                CleanRegistryOnly();
-                keysCurrentlyRegistered = false;
+                // Install folder was deleted manually -> purge every leftover immediately
+                PerformUninstallSteps(false);
+                SpawnCleanupHelper(Process.GetCurrentProcess().Id,
+                    Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "UnBlock"));
+                Environment.Exit(0);
             }
         }
+    }
+
+    private static bool AreContextKeysRegistered() {
+        try {
+            using (var baseKey = Microsoft.Win32.RegistryKey.OpenBaseKey(Microsoft.Win32.RegistryHive.LocalMachine, Microsoft.Win32.RegistryView.Registry64)) {
+                using (var k = baseKey.OpenSubKey(@"SOFTWARE\Classes\Directory\shell\UnBlock")) {
+                    return k != null;
+                }
+            }
+        } catch {
+            return true;
+        }
+    }
+
+    private static void RunInteractiveUninstall(bool silent) {
+        if (!IsCurrentUserElevated()) {
+            try {
+                ProcessStartInfo relaunch = new ProcessStartInfo();
+                relaunch.FileName = Application.ExecutablePath;
+                relaunch.Arguments = "[UNINSTALL]" + (silent ? " /SILENT" : "");
+                relaunch.Verb = "runas";
+                Process.Start(relaunch);
+                return;
+            } catch { }
+        }
+
+        if (!silent) {
+            DialogResult choice = MessageBox.Show(
+                "This will completely remove UnBlock from your computer:\n\n" +
+                "•  Right-click context menu entries\n" +
+                "•  Background maintenance task\n" +
+                "•  All leftover files and folders\n\n" +
+                "Continue with the uninstall?",
+                "Uninstall UnBlock", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+            if (choice != DialogResult.Yes) return;
+        }
+
+        PerformUninstallSteps(true);
+
+        string installDir = "";
+        try { installDir = Path.GetDirectoryName(Application.ExecutablePath); } catch { }
+        string localAppDataDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "UnBlock");
+        SpawnCleanupHelper(Process.GetCurrentProcess().Id, installDir, localAppDataDir);
+
+        if (!silent) {
+            MessageBox.Show("UnBlock has been completely uninstalled.", "Uninstall Complete",
+                MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+    }
+
+    private static bool IsCurrentUserElevated() {
+        WindowsIdentity id = WindowsIdentity.GetCurrent();
+        WindowsPrincipal principal = new WindowsPrincipal(id);
+        return principal.IsInRole(WindowsBuiltInRole.Administrator);
+    }
+
+    private static void PerformUninstallSteps(bool killInstances) {
+        if (killInstances) KillRunningInstances();
+        DeleteScheduledTask();
+        CleanRegistryOnly();
+        try {
+            string localAppDataDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "UnBlock");
+            DeleteDirectoryWithRetry(localAppDataDir);
+        } catch { }
+    }
+
+    private static void KillRunningInstances() {
+        int currentPid = Process.GetCurrentProcess().Id;
+        foreach (string name in new string[] { "Unlocker", "UnBlockWatcher" }) {
+            Process[] procs = Process.GetProcessesByName(name);
+            foreach (Process p in procs) {
+                try {
+                    if (p.Id == currentPid) continue;
+                    p.Kill();
+                    p.WaitForExit(3000);
+                } catch { }
+                finally {
+                    try { p.Dispose(); } catch { }
+                }
+            }
+        }
+    }
+
+    private static void DeleteScheduledTask() {
+        RunHiddenProcess("schtasks.exe", "/delete /tn \"UnBlock-Cleanup\" /f");
+    }
+
+    private static void RunHiddenProcess(string fileName, string arguments) {
+        try {
+            using (Process p = new Process()) {
+                p.StartInfo.FileName = fileName;
+                p.StartInfo.Arguments = arguments;
+                p.StartInfo.CreateNoWindow = true;
+                p.StartInfo.UseShellExecute = false;
+                p.Start();
+                p.WaitForExit(10000);
+            }
+        } catch { }
+    }
+
+    private static void DeleteDirectoryWithRetry(string path) {
+        if (string.IsNullOrEmpty(path) || !Directory.Exists(path)) return;
+        for (int i = 0; i < 6; i++) {
+            try {
+                Directory.Delete(path, true);
+                if (!Directory.Exists(path)) return;
+            } catch { }
+            Thread.Sleep(400);
+        }
+    }
+
+    private static void SpawnCleanupHelper(int pidToWait, params string[] directories) {
+        try {
+            string self = Application.ExecutablePath;
+            string helperPath = Path.Combine(Path.GetTempPath(), "UnBlockCleanup-" + Guid.NewGuid().ToString("N").Substring(0, 10) + ".tmp");
+            File.Copy(self, helperPath, true);
+
+            StringBuilder argBuilder = new StringBuilder("[CLEANUP] " + pidToWait);
+            foreach (string dir in directories) {
+                if (!string.IsNullOrEmpty(dir)) argBuilder.Append(" \"" + dir + "\"");
+            }
+
+            ProcessStartInfo psi = new ProcessStartInfo(helperPath, argBuilder.ToString());
+            psi.CreateNoWindow = true;
+            psi.UseShellExecute = false;
+            Process.Start(psi);
+        } catch { }
+    }
+
+    private static void RunCleanupHelper(string[] args) {
+        try {
+            int pidToWait = int.Parse(args[1]);
+            try {
+                using (Process p = Process.GetProcessById(pidToWait)) {
+                    p.WaitForExit(20000);
+                }
+            } catch { }
+
+            DeleteScheduledTask();
+            CleanRegistryOnly();
+
+            for (int i = 2; i < args.Length; i++) {
+                DeleteDirectoryWithRetry(args[i]);
+            }
+
+            SelfDestruct();
+        } catch { }
+        Environment.Exit(0);
+    }
+
+    private static void SelfDestruct() {
+        try {
+            string self = Application.ExecutablePath;
+            string renamed = self + ".pending-delete";
+            try { File.Move(self, renamed); } catch { renamed = self; }
+            MoveFileEx(renamed, null, MOVEFILE_DELAY_UNTIL_REBOOT);
+        } catch { }
     }
 
     private static void CleanRegistryOnly() {
@@ -1715,6 +2036,8 @@ public class UnlockerForm : Form {
                 baseKey.DeleteSubKeyTree(@"SOFTWARE\Classes\*\shell\UnBlock", false);
                 baseKey.DeleteSubKeyTree(@"SOFTWARE\Classes\Directory\shell\UnBlock", false);
                 baseKey.DeleteSubKeyTree(@"SOFTWARE\Classes\Directory\Background\shell\UnBlock", false);
+                baseKey.DeleteSubKeyTree(@"SOFTWARE\Classes\Drive\shell\UnBlock", false);
+                baseKey.DeleteSubKeyTree(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\UnBlock", false);
             }
         } catch { }
     }
@@ -1749,6 +2072,15 @@ public class UnlockerForm : Form {
                         cmd.SetValue("", string.Format("\"{0}\" \"%V\"", exePath));
                     }
                 }
+
+                // 4. Restore: Right Click -> Drives
+                using (var k = baseKey.CreateSubKey(@"SOFTWARE\Classes\Drive\shell\UnBlock")) {
+                    k.SetValue("", "UnBlock");
+                    k.SetValue("Icon", "shell32.dll,239");
+                    using (var cmd = k.CreateSubKey("command")) {
+                        cmd.SetValue("", string.Format("\"{0}\" \"%1\"", exePath));
+                    }
+                }
             }
         } catch { }
     }
@@ -1768,6 +2100,38 @@ public class UnlockerForm : Form {
             RunWatcherMode(args[1]);
             return;
         }
+
+        // --- NATIVE UNINSTALLER (NO CONSOLE) ---
+        bool silentUninstall = false;
+        if (args.Length >= 1 && args[0] == "[UNINSTALL]") {
+            foreach (string a in args) {
+                if (string.Equals(a, "/SILENT", StringComparison.OrdinalIgnoreCase) || string.Equals(a, "/S", StringComparison.OrdinalIgnoreCase)) silentUninstall = true;
+            }
+            Application.EnableVisualStyles();
+            Application.SetCompatibleTextRenderingDefault(false);
+            RunInteractiveUninstall(silentUninstall);
+            return;
+        }
+
+        // --- INTERNAL POST-EXIT CLEANUP HELPER ---
+        if (args.Length >= 2 && args[0] == "[CLEANUP]") {
+            RunCleanupHelper(args);
+            return;
+        }
+
+        // --- DEDICATED UNINSTALLER BINARY (uninstall.exe) ---
+        try {
+            if (Path.GetFileNameWithoutExtension(Application.ExecutablePath).Equals("uninstall", StringComparison.OrdinalIgnoreCase)) {
+                bool silent = false;
+                foreach (string a in args) {
+                    if (string.Equals(a, "/SILENT", StringComparison.OrdinalIgnoreCase) || string.Equals(a, "/S", StringComparison.OrdinalIgnoreCase)) silent = true;
+                }
+                Application.EnableVisualStyles();
+                Application.SetCompatibleTextRenderingDefault(false);
+                RunInteractiveUninstall(silent);
+                return;
+            }
+        } catch { }
 
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);

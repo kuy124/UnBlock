@@ -44,7 +44,7 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
 }
 
 $ExePath = Join-Path $InstallDir "Unlocker.exe"
-$UninstallerPath = Join-Path $InstallDir "uninstall.bat"
+$UninstallExePath = Join-Path $InstallDir "uninstall.exe"
 
 if (-not (Test-Path $InstallDir)) {
     New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
@@ -64,52 +64,9 @@ try {
 Write-Host "[*] Warming up process caches..."
 Start-Process -FilePath $ExePath -ArgumentList "[WARMUP]" -WindowStyle Hidden -Wait
 
-# Write Uninstaller script to the install directory
-# Saved as Ascii to maximize compatibility and avoid Byte Order Mark (BOM) issues.
-$UninstallerCode = @"
-@echo off
-:: Polished Uninstaller for UnBlock
-
-:: Check for Admin Privileges
-net session >nul 2>&1
-if %errorLevel% neq 0 (
-    powershell -NoProfile -WindowStyle Hidden -Command "Start-Process -FilePath '%~f0' -ArgumentList '-silent' -Verb RunAs"
-    exit /b
-)
-
-:: Relaunch with hidden console if not already running silently
-if "%~1" neq "-silent" (
-    powershell -NoProfile -WindowStyle Hidden -Command "Start-Process -FilePath '%~f0' -ArgumentList '-silent'"
-    exit /b
-)
-
-:: Prompt user with a GUI confirmation message box
-powershell -NoProfile -Command "Add-Type -AssemblyName System.Windows.Forms; if ([System.Windows.Forms.MessageBox]::Show('Are you sure you want to completely remove UnBlock and all of its components?', 'Uninstall UnBlock', 'YesNo', 'Question') -eq 'No') { exit 1 }"
-if %errorLevel% neq 0 exit /b
-
-:: Fast execution pipeline
-taskkill /f /im Unlocker.exe >nul 2>&1
-taskkill /f /im UnBlockWatcher.exe >nul 2>&1
-
-:: Clean up the automated maintenance task
-schtasks /delete /tn "UnBlock-Cleanup" /f >nul 2>&1
-
-:: Delete the background launcher script from LocalAppData
-if exist "%LocalAppData%\UnBlock" rmdir /s /q "%LocalAppData%\UnBlock" >nul 2>&1
-
-reg delete "HKLM\SOFTWARE\Classes\*\shell\UnBlock" /f >nul 2>&1
-reg delete "HKLM\SOFTWARE\Classes\Directory\shell\UnBlock" /f >nul 2>&1
-reg delete "HKLM\SOFTWARE\Classes\Directory\Background\shell\UnBlock" /f >nul 2>&1
-reg delete "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\UnBlock" /f >nul 2>&1
-
-powershell -NoProfile -Command "Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.MessageBox]::Show('UnBlock has been successfully uninstalled.', 'Uninstall Complete', 'OK', 'Information')"
-
-:: Fast self-deletion via hidden CMD process
-powershell -NoProfile -WindowStyle Hidden -Command "Start-Process -FilePath 'cmd.exe' -ArgumentList '/c timeout /t 1 >nul & rmdir /s /q `"$InstallDir`"' -WindowStyle Hidden"
-exit /b
-"@
-
-Set-Content -Path $UninstallerPath -Value $UninstallerCode -Encoding Ascii -Force
+# Dedicated native uninstaller binary (GUI only - no console, works from Settings > Apps)
+Write-Host "[*] Deploying native uninstaller..."
+Copy-Item -Path $ExePath -Destination $UninstallExePath -Force
 
 # =========================================================================
 # HARDENED REGISTRY SETUP
@@ -144,7 +101,8 @@ $uninstallKey = $baseKey.CreateSubKey("SOFTWARE\Microsoft\Windows\CurrentVersion
 $uninstallKey.SetValue("DisplayName", "UnBlock File & Folder Unlocker")
 $uninstallKey.SetValue("DisplayVersion", "2.1.0")
 $uninstallKey.SetValue("Publisher", "UnBlock")
-$uninstallKey.SetValue("UninstallString", "`"$UninstallerPath`" -silent")  # Quiet launch integration
+$uninstallKey.SetValue("UninstallString", "`"$UninstallExePath`"")  # Native GUI uninstaller (no console)
+$uninstallKey.SetValue("QuietUninstallString", "`"$UninstallExePath`" /SILENT")
 $uninstallKey.SetValue("InstallLocation", "`"$InstallDir`"")
 $uninstallKey.SetValue("DisplayIcon", "`"$ExePath`"")
 $uninstallKey.SetValue("NoModify", [int]1, [Microsoft.Win32.RegistryValueKind]::DWord)
