@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  To ensure security and transparency, UnBlock does not ship as a pre-compiled program. Instead, the installer automatically builds the readable C# source code locally on your machine during setup.
+  To ensure security and transparency, UnBlock does not ship a pre-built main program. The <code>setup.exe</code> installer compiles the readable C# source code from the <code>src</code> folder locally on your machine during setup, and then removes itself and the sources automatically — leaving only the installed program.
 </p>
 
 <br>
@@ -25,12 +25,14 @@ Follow these steps to set up UnBlock on your computer.
 2. **Do not double-click or run files directly inside the zip folder.**
 3. Right-click the `.zip` file, select **Extract All...**, and extract the contents to a normal folder of your choice.
 
-### Step 2: Run the Installer
-1. Open the folder where you extracted the files. You should see `install.bat` and a `src` folder containing the `.cs` source files.
-2. Right-click **`install.bat`** and select **Run as Administrator**.
-3. Choose where you want to install UnBlock (or simply press **OK** to accept the default folder: `C:\Program Files\UnBlock`).
+### Step 2: Run the Setup
+1. Double-click **`setup.exe`**.
+   * If Windows SmartScreen appears (the setup binary is unsigned), click **More info** → **Run anyway**.
+2. Choose where you want to install UnBlock (or simply press **OK** to accept the default folder: `C:\Program Files\UnBlock`).
+3. The setup compiles the source code locally, registers your right-click menu, and then **deletes itself and the `src` folder automatically** — leaving only the installed program behind.
 
-> <i>The setup script will compile the code, register the right-click menu, and configure an invisible background cleanup task. You are now ready to use UnBlock!</i>
+> <i>Transparency note: <code>setup.exe</code> is compiled from <code>src/Setup.cs</code>. Prefer to build it yourself? Run:<br>
+> <code>%WINDIR%\Microsoft.NET\Framework64\v4.0.30319\csc.exe /nologo /target:winexe /out:setup.exe src\Setup.cs</code></i>
 
 <hr>
 
