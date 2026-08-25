@@ -31,12 +31,16 @@ internal static class Setup {
         try { Environment.CurrentDirectory = Environment.GetFolderPath(Environment.SpecialFolder.System); } catch { }
 
         bool silent = false;
+        bool keepSetup = false;
         string customDir = null;
         StringBuilder relaunchArgs = new StringBuilder();
         foreach (string a in args) {
             if (string.Equals(a, "/SILENT", StringComparison.OrdinalIgnoreCase) || string.Equals(a, "/S", StringComparison.OrdinalIgnoreCase)) {
                 silent = true;
                 relaunchArgs.Append(" /SILENT");
+            } else if (string.Equals(a, "/KEEPSETUP", StringComparison.OrdinalIgnoreCase) || string.Equals(a, "/K", StringComparison.OrdinalIgnoreCase)) {
+                keepSetup = true;
+                relaunchArgs.Append(" /KEEPSETUP");
             } else if (a.StartsWith("/DIR=", StringComparison.OrdinalIgnoreCase)) {
                 customDir = a.Substring(5).Trim('"');
                 relaunchArgs.Append(" \"" + a + "\"");
@@ -58,6 +62,11 @@ internal static class Setup {
         string baseDir = "";
         try { baseDir = Path.GetDirectoryName(setupExe); } catch { }
         string srcDir = Path.Combine(baseDir, "src");
+
+        // Developer protection: a source checkout keeps a .git entry next to
+        // setup.exe, so the setup never deletes itself or the sources there.
+        bool developerCopy = Directory.Exists(Path.Combine(baseDir, ".git")) ||
+                             File.Exists(Path.Combine(baseDir, ".git"));
 
         List<string> sources = new List<string>();
         try {
@@ -109,11 +118,18 @@ internal static class Setup {
         }
 
         if (!silent) {
-            MessageBox.Show("UnBlock was installed successfully!\n\nYou can now Right-Click any locked file or folder and choose UnBlock.\n\nInstalled to:\n" + installDir, "Setup Complete", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            string note = "";
+            if (developerCopy || keepSetup) {
+                note = "\n\n(Developer mode - setup.exe and the src folder were kept.)";
+            }
+            MessageBox.Show("UnBlock was installed successfully!\n\nYou can now Right-Click any locked file or folder and choose UnBlock.\n\nInstalled to:\n" + installDir + note, "Setup Complete", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
 
         // Remove the setup itself and the extracted sources now that everything is installed.
-        SpawnSelfCleanup(Process.GetCurrentProcess().Id, setupExe, srcDir);
+        // Developer checkouts (a .git entry next to setup.exe) and /KEEPSETUP are never touched.
+        if (!developerCopy && !keepSetup) {
+            SpawnSelfCleanup(Process.GetCurrentProcess().Id, setupExe, srcDir);
+        }
     }
 
     private static void CompileApplication(List<string> sources, string outputExe) {

@@ -33,6 +33,7 @@ Follow these steps to set up UnBlock on your computer.
 
 > <i>Transparency note: <code>setup.exe</code> is compiled from <code>src/Setup.cs</code>. Prefer to build it yourself? Run:<br>
 > <code>%WINDIR%\Microsoft.NET\Framework64\v4.0.30319\csc.exe /nologo /target:winexe /out:setup.exe src\Setup.cs</code></i>
+> <i>Developer note: when <code>setup.exe</code> runs from a source checkout (a <code>.git</code> folder sits next to it), it detects developer mode and keeps itself and the <code>src</code> folder after installing. The <code>/KEEPSETUP</code> flag forces the same behavior anywhere.</i>
 
 <hr>
 
