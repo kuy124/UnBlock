@@ -50,6 +50,8 @@ internal static class Uninstaller {
     }
 
     internal static void RunInteractiveUninstall(bool silent) {
+        try { Environment.CurrentDirectory = Environment.GetFolderPath(Environment.SpecialFolder.System); } catch { }
+
         if (!IsCurrentUserElevated()) {
             try {
                 ProcessStartInfo relaunch = new ProcessStartInfo();
@@ -150,6 +152,9 @@ internal static class Uninstaller {
         if (string.IsNullOrEmpty(path) || !Directory.Exists(path)) return;
         for (int i = 0; i < 6; i++) {
             try {
+                foreach (string file in Directory.GetFiles(path, "*", SearchOption.AllDirectories)) {
+                    try { File.SetAttributes(file, FileAttributes.Normal); } catch { }
+                }
                 Directory.Delete(path, true);
                 if (!Directory.Exists(path)) return;
             } catch { }
@@ -171,12 +176,15 @@ internal static class Uninstaller {
             ProcessStartInfo psi = new ProcessStartInfo(helperPath, argBuilder.ToString());
             psi.CreateNoWindow = true;
             psi.UseShellExecute = false;
+            psi.WorkingDirectory = Environment.GetFolderPath(Environment.SpecialFolder.System);
             Process.Start(psi);
         } catch { }
     }
 
     internal static void RunCleanupHelper(string[] args) {
         try {
+            try { Environment.CurrentDirectory = Environment.GetFolderPath(Environment.SpecialFolder.System); } catch { }
+
             int pidToWait = int.Parse(args[1]);
             try {
                 using (Process p = Process.GetProcessById(pidToWait)) {

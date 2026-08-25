@@ -23,12 +23,16 @@ exit /b
 ##POWERSHELL_START##
 Add-Type -AssemblyName System.Windows.Forms
 
-# Gather every C# source file sitting next to this install.bat
-$SourceFiles = @(Get-ChildItem -LiteralPath $InstallSourceDir -Filter "*.cs" -File | Select-Object -ExpandProperty FullName)
+# Gather every C# source file from the src folder next to this install.bat
+$SourceDir = Join-Path $InstallSourceDir "src"
+$SourceFiles = @()
+if (Test-Path -LiteralPath $SourceDir) {
+    $SourceFiles = @(Get-ChildItem -LiteralPath $SourceDir -Filter "*.cs" -File | Select-Object -ExpandProperty FullName)
+}
 
 # Error Check: Make sure the user didn't separate the files
 if ($SourceFiles.Count -eq 0) {
-    [System.Windows.Forms.MessageBox]::Show("Could not find any .cs source files in the installation folder.`n`nPlease make sure install.bat and all the .cs source files are extracted into the exact same folder before running.", "Setup Error", "OK", "Error")
+    [System.Windows.Forms.MessageBox]::Show("Could not find the 'src' folder with the .cs source files next to install.bat.`n`nPlease make sure the entire repository (install.bat + src folder) is extracted together before running.", "Setup Error", "OK", "Error")
     Exit
 }
 
