@@ -21,6 +21,8 @@ public class UnlockerForm : Form {
     private Button btnUnlockAll;
     private Button btnKill;
     private Button btnKillAll;
+    private Button btnForceDelete;
+    private Button btnElevate;
     private Button btnClose;
     private Button btnAddFile;
     private Button btnAddFolder;
@@ -42,12 +44,6 @@ public class UnlockerForm : Form {
     private bool isScanning = false;
     private readonly object ipcLock = new object();
     private readonly object scanLock = new object();
-
-    private enum Severity {
-        Low,      // Benign / Green
-        Medium,   // Active Read / Orange
-        High      // Severe Write/Delete Lockout / Red
-    }
 
     // --- Win32 Native API Declarations ---
     [DllImport("user32.dll", SetLastError = true)]
@@ -96,6 +92,27 @@ public class UnlockerForm : Form {
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern IntPtr CreateFile(string lpFileName, uint dwDesiredAccess, uint dwShareMode, IntPtr lpSecurityAttributes, uint dwCreationDisposition, uint dwFlagsAndAttributes, IntPtr hTemplateFile);
 
+    [DllImport("kernel32.dll", EntryPoint = "Module32FirstW", SetLastError = true, CharSet = CharSet.Unicode)]
+    private static extern bool Module32First(IntPtr hSnapshot, ref MODULEENTRY32 lpme);
+
+    [DllImport("kernel32.dll", EntryPoint = "Module32NextW", SetLastError = true, CharSet = CharSet.Unicode)]
+    private static extern bool Module32Next(IntPtr hSnapshot, ref MODULEENTRY32 lpme);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr VirtualQueryEx(IntPtr hProcess, IntPtr lpAddress, out MEMORY_BASIC_INFORMATION lpBuffer, IntPtr dwLength);
+
+    [DllImport("psapi.dll", EntryPoint = "GetMappedFileNameW", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern int GetMappedFileName(IntPtr hProcess, IntPtr lpv, StringBuilder lpFilename, int nSize);
+
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    private static extern bool MoveFileEx(string lpExistingFileName, string lpNewFileName, uint dwFlags);
+
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    private static extern bool DeleteFile(string lpFileName);
+
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    private static extern bool RemoveDirectory(string lpPathName);
+
     // --- Privilege Adjustment Constants ---
     [StructLayout(LayoutKind.Sequential)]
     private struct LUID {
@@ -123,6 +140,10 @@ public class UnlockerForm : Form {
     private static extern IntPtr ExtractIcon(IntPtr hInst, string lpszExeFileName, int nIconIndex);
 
     private const uint TH32CS_SNAPPROCESS = 0x00000002;
+    private const uint TH32CS_SNAPMODULE = 0x00000008;
+    private const uint TH32CS_SNAPMODULE32 = 0x00000010;
+    private const uint MOVEFILE_DELAY_UNTIL_REBOOT = 0x00000004;
+    
     private const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
     private const uint PROCESS_DUP_HANDLE = 0x0040;
     private const uint DUPLICATE_CLOSE_SOURCE = 0x00000001;
@@ -139,45 +160,18 @@ public class UnlockerForm : Form {
     private const uint FILE_FLAG_BACKUP_SEMANTICS = 0x02000000;
     private static readonly IntPtr INVALID_HANDLE_VALUE = new IntPtr(-1);
 
-    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Auto)]
-    private struct PROCESSENTRY32 {
-        public uint dwSize;
-        public uint cntUsage;
-        public uint th32ProcessID;
-        public IntPtr th32DefaultHeapID;
-        public uint th32ModuleID;
-        public uint cntThreads;
-        public uint th32ParentProcessID;
-        public int pcPriClassBase;
-        public uint dwFlags;
-        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)]
-        public string szExeFile;
-    }
-
-    private struct HandleInfo {
-        public IntPtr HandleValue;
-        public ushort ObjectTypeIndex;
-        public uint GrantedAccess;
-    }
-
-    private class TargetMatchInfo {
-        public string OriginalPath { get; set; }
-        public string NormalizedPath { get; set; }
-        public bool IsDir { get; set; }
-        public bool IsNetwork { get; set; }
-        public string networkSearchPath { get; set; }
-        public string TargetDevicePath { get; set; }
-        public string DevicePathWithSlash { get; set; }
-    }
-
     private static readonly Dictionary<int, string> ProcessPathMap = new Dictionary<int, string>();
     private static readonly Dictionary<int, string> ProcessNameMap = new Dictionary<int, string>();
     private static DateTime lastSnapshotTime = DateTime.MinValue;
     private static readonly TimeSpan CacheTtl = TimeSpan.FromSeconds(8);
     private static readonly object CacheLock = new object();
 
+    private static readonly Dictionary<string, Icon> IconCache = new Dictionary<string, Icon>(StringComparer.OrdinalIgnoreCase);
+    private static Icon defaultFileIcon;
+    private static readonly object iconCacheLock = new object();
+
     public UnlockerForm(List<string> paths) {
-        isInitializing = true; // Block scanning during construction to aggregate startup paths safely
+        isInitializing = true; 
 
         foreach (var p in paths) {
             if (!string.IsNullOrEmpty(p)) {
@@ -202,12 +196,12 @@ public class UnlockerForm : Form {
 
         InitFileTypeIndex(); 
         InitializeComponent();
-        SetupIpcTimer(); // Safe high-frequency direct directory sweep
+        SetupIpcTimer(); 
 
         isInitializing = false; 
 
         UpdateTargetLabel();
-        StartAsyncScan(false); // Exactly one scan triggered for all loaded items
+        StartAsyncScan(false); 
     }
 
     private static void InitFileTypeIndex() {
@@ -285,8 +279,6 @@ public class UnlockerForm : Form {
             if (hIcon != IntPtr.Zero) { this.Icon = Icon.FromHandle(hIcon); }
         } catch { }
 
-        // Layout Fix: Explicitly initialize panel width to match the form first.
-        // This prevents the anchoring system from sliding controls off-screen during stretch operations.
         Panel headerPanel = new Panel() {
             Width = 720, 
             Height = 80,
@@ -296,7 +288,7 @@ public class UnlockerForm : Form {
 
         lblTarget = new Label() {
             Location = new Point(20, 15),
-            Size = new Size(310, 22), // Balanced layout allocation
+            Size = new Size(310, 22), 
             Font = new Font("Segoe UI", 10, FontStyle.Bold),
             ForeColor = Color.White,
             AutoEllipsis = true,
@@ -306,17 +298,16 @@ public class UnlockerForm : Form {
         lblTitle = new Label() {
             Text = "Ready to scan.",
             Location = new Point(20, 42),
-            Size = new Size(310, 20), // Balanced layout allocation
+            Size = new Size(310, 20), 
             Font = new Font("Segoe UI", 9, FontStyle.Regular),
             ForeColor = Color.FromArgb(189, 195, 199),
             Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right
         };
 
-        // Layout Scaling Fix: Shifted and widened button dimensions to prevent text truncation
         btnAddFile = new Button() {
             Text = "+ File",
             Location = new Point(340, 22), 
-            Size = new Size(100, 28),     // Generous spacing prevents "+ " clipping
+            Size = new Size(100, 28),     
             FlatStyle = FlatStyle.Flat,
             BackColor = Color.FromArgb(52, 152, 219),
             ForeColor = Color.White,
@@ -331,7 +322,7 @@ public class UnlockerForm : Form {
         btnAddFolder = new Button() {
             Text = "+ Folder",
             Location = new Point(450, 22), 
-            Size = new Size(110, 28),     // Generous spacing prevents "+ " clipping
+            Size = new Size(110, 28),     
             FlatStyle = FlatStyle.Flat,
             BackColor = Color.FromArgb(41, 128, 185),
             ForeColor = Color.White,
@@ -345,7 +336,7 @@ public class UnlockerForm : Form {
 
         lblAdminState = new Label() {
             Text = isAdmin ? "🛡️ Admin" : "⚠️ Standard User",
-            Location = new Point(570, 25), 
+            Location = new Point(570, 15), 
             Size = new Size(120, 22),     
             Font = new Font("Segoe UI", 9, FontStyle.Bold),
             ForeColor = isAdmin ? Color.FromArgb(46, 204, 113) : Color.FromArgb(243, 156, 18),
@@ -358,6 +349,24 @@ public class UnlockerForm : Form {
         headerPanel.Controls.Add(btnAddFile);
         headerPanel.Controls.Add(btnAddFolder);
         headerPanel.Controls.Add(lblAdminState);
+
+        if (!isAdmin) {
+            btnElevate = new Button() {
+                Text = "🛡️ Elevate",
+                Location = new Point(585, 42), 
+                Size = new Size(100, 26),     
+                FlatStyle = FlatStyle.Flat,
+                BackColor = Color.FromArgb(241, 196, 15), // Gold Yellow
+                ForeColor = Color.Black,
+                Font = new Font("Segoe UI", 8.5F, FontStyle.Bold),
+                Cursor = Cursors.Hand,
+                Anchor = AnchorStyles.Top | AnchorStyles.Right
+            };
+            btnElevate.FlatAppearance.BorderSize = 0;
+            btnElevate.Click += BtnElevate_Click;
+            toolTip.SetToolTip(btnElevate, "Restart UnBlock as Administrator to enable complete security adjustments.");
+            headerPanel.Controls.Add(btnElevate);
+        }
 
         lblFilter = new Label() {
             Text = "Filter results:",
@@ -418,23 +427,27 @@ public class UnlockerForm : Form {
         contextMenu.MenuItems.Add(openLocationItem);
         listView.ContextMenu = contextMenu;
 
-        btnUnlock = CreateStyledButton("Unlock Selected", 20, 395, 125, Color.FromArgb(46, 204, 113), Color.White);
+        btnUnlock = CreateStyledButton("Unlock Selected", 20, 395, 115, Color.FromArgb(46, 204, 113), Color.White);
         btnUnlock.Click += BtnUnlock_Click;
         toolTip.SetToolTip(btnUnlock, "Forcefully close the file handle owned by the selected process.");
 
-        btnUnlockAll = CreateStyledButton("Unlock All", 155, 395, 100, Color.FromArgb(39, 174, 96), Color.White);
+        btnUnlockAll = CreateStyledButton("Unlock All", 145, 395, 95, Color.FromArgb(39, 174, 96), Color.White);
         btnUnlockAll.Click += BtnUnlockAll_Click;
         toolTip.SetToolTip(btnUnlockAll, "Close all locked active handles found in the list.");
 
-        btnKill = CreateStyledButton("Kill Process", 265, 395, 110, Color.FromArgb(231, 76, 60), Color.White);
+        btnKill = CreateStyledButton("Kill Process", 250, 395, 105, Color.FromArgb(231, 76, 60), Color.White);
         btnKill.Click += BtnKill_Click;
         toolTip.SetToolTip(btnKill, "Forcibly terminate the selected locking program.");
 
-        btnKillAll = CreateStyledButton("Kill All", 385, 395, 90, Color.FromArgb(192, 57, 43), Color.White);
+        btnKillAll = CreateStyledButton("Kill All", 370, 395, 85, Color.FromArgb(192, 57, 43), Color.White);
         btnKillAll.Click += BtnKillAll_Click;
         toolTip.SetToolTip(btnKillAll, "Forcibly terminate all processes holding locking handles.");
 
-        btnClose = CreateStyledButton("Close", 580, 395, 100, Color.FromArgb(149, 165, 166), Color.Black);
+        btnForceDelete = CreateStyledButton("Force Delete", 465, 395, 120, Color.FromArgb(230, 126, 34), Color.White);
+        btnForceDelete.Click += BtnForceDelete_Click;
+        toolTip.SetToolTip(btnForceDelete, "Forcibly delete files instantly by killing locks, resetting permission ACLs, or scheduling a system-level reboot deletion.");
+
+        btnClose = CreateStyledButton("Close", 595, 395, 85, Color.FromArgb(149, 165, 166), Color.Black);
         btnClose.Anchor = AnchorStyles.Bottom | AnchorStyles.Right;
         btnClose.Click += delegate { this.Close(); };
 
@@ -447,6 +460,7 @@ public class UnlockerForm : Form {
         this.Controls.Add(btnUnlockAll);
         this.Controls.Add(btnKill);
         this.Controls.Add(btnKillAll);
+        this.Controls.Add(btnForceDelete);
         this.Controls.Add(btnClose);
 
         UpdateButtonStates();
@@ -491,19 +505,6 @@ public class UnlockerForm : Form {
         }
     }
 
-    private class ProcessItem {
-        public int Pid { get; set; }
-        public string Name { get; set; }
-        public string Path { get; set; }
-        public uint GrantedAccess { get; set; }
-        public bool IsDir { get; set; }
-        public List<IntPtr> Handles { get; set; }
-
-        public ProcessItem() {
-            Handles = new List<IntPtr>();
-        }
-    }
-
     private void SetupIpcTimer() {
         string appData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
         string pendingDir = Path.Combine(appData, "UnBlock\\Pending");
@@ -512,7 +513,7 @@ public class UnlockerForm : Form {
         } catch { }
 
         ipcTimer = new System.Windows.Forms.Timer();
-        ipcTimer.Interval = 50; // Check LocalAppData directory sweep every 50ms (0% CPU impact, bulletproof accuracy)
+        ipcTimer.Interval = 50; 
         ipcTimer.Tick += (sender, e) => {
             ProcessExistingPendingFiles(pendingDir);
         };
@@ -621,14 +622,13 @@ public class UnlockerForm : Form {
 
     private void StartAsyncScan(bool forceRefresh = false) {
         lock (scanLock) {
-            if (isScanning) return; // Prevent concurrent scans from overlapping
+            if (isScanning) return; 
             isScanning = true;
         }
 
         HashSet<string> targetsSnapshot;
         lock (ipcLock) {
             if (targetPaths.Count == 0) {
-                // Safeguard Fix: InvokeUI updates safely without invoking BeginInvoke inside constructor execution
                 MethodInvoker updateEmptyUI = delegate {
                     progressBar.Visible = false;
                     currentScanResults.Clear();
@@ -645,7 +645,6 @@ public class UnlockerForm : Form {
 
                 return;
             }
-            // Snapshot copy prevents collection modification issues during background tasks
             targetsSnapshot = new HashSet<string>(targetPaths, StringComparer.OrdinalIgnoreCase);
         }
 
@@ -691,7 +690,14 @@ public class UnlockerForm : Form {
         });
     }
 
-    private static string GetAccessInfo(uint grantedAccess, bool isDir) {
+    private static string GetAccessInfo(ProcessItem item) {
+        if (item.IsModuleLock) {
+            return item.IsDir ? "Loaded Module Directory Lock" : "Active DLL / Module Lock";
+        }
+
+        uint grantedAccess = item.GrantedAccess;
+        bool isDir = item.IsDir;
+
         // Evaluate typical bitmask flags for read, write, and delete permissions
         bool hasWrite = (grantedAccess & 0x0002) != 0 || (grantedAccess & 0x0004) != 0 || (grantedAccess & 0x0100) != 0 || (grantedAccess & 0x00040000) != 0;
         bool hasDelete = (grantedAccess & 0x00010000) != 0;
@@ -719,7 +725,7 @@ public class UnlockerForm : Form {
         if (accessInfo.StartsWith("Active Read")) {
             return Severity.Medium;
         }
-        return Severity.High; // Write, delete, exclusive, full control, modify
+        return Severity.High; 
     }
 
     private void ApplyFilter(string filterText) {
@@ -727,11 +733,16 @@ public class UnlockerForm : Form {
         listView.Items.Clear();
         imageList.Images.Clear();
 
-        Icon defaultIcon = null;
-        try {
-            IntPtr hIcon = ExtractIcon(IntPtr.Zero, "shell32.dll", 2); // Fallback generic program icon
-            if (hIcon != IntPtr.Zero) defaultIcon = Icon.FromHandle(hIcon);
-        } catch { }
+        Icon defaultIcon;
+        lock (iconCacheLock) {
+            if (defaultFileIcon == null) {
+                try {
+                    IntPtr hIcon = ExtractIcon(IntPtr.Zero, "shell32.dll", 2); 
+                    if (hIcon != IntPtr.Zero) defaultFileIcon = Icon.FromHandle(hIcon);
+                } catch { }
+            }
+            defaultIcon = defaultFileIcon;
+        }
 
         int iconIndex = 0;
         var filtered = currentScanResults;
@@ -744,10 +755,18 @@ public class UnlockerForm : Form {
         }
 
         foreach (var item in filtered) {
-            Icon procIcon = defaultIcon;
-            if (!string.IsNullOrEmpty(item.Path) && File.Exists(item.Path)) {
-                try { procIcon = Icon.ExtractAssociatedIcon(item.Path); } catch { }
+            Icon procIcon = null;
+            if (!string.IsNullOrEmpty(item.Path)) {
+                lock (iconCacheLock) {
+                    if (!IconCache.TryGetValue(item.Path, out procIcon)) {
+                        try {
+                            procIcon = File.Exists(item.Path) ? Icon.ExtractAssociatedIcon(item.Path) : null;
+                        } catch { procIcon = null; }
+                        IconCache[item.Path] = procIcon;
+                    }
+                }
             }
+            if (procIcon == null) procIcon = defaultIcon;
 
             if (procIcon != null) imageList.Images.Add(procIcon);
             else {
@@ -755,7 +774,7 @@ public class UnlockerForm : Form {
                 imageList.Images.Add(bmp);
             }
 
-            string accessInfo = GetAccessInfo(item.GrantedAccess, item.IsDir);
+            string accessInfo = GetAccessInfo(item);
             Severity severity = GetSeverity(accessInfo);
 
             ListViewItem lvi = new ListViewItem(new string[] { 
@@ -767,31 +786,26 @@ public class UnlockerForm : Form {
             lvi.ImageIndex = iconIndex;
             lvi.Tag = item;
 
-            // Apply color coding styling directly based on Severity classifications
             lvi.UseItemStyleForSubItems = false;
             if (severity == Severity.High) {
-                // High Severity - Severe Lockout (Crimson Red)
                 lvi.ForeColor = Color.Black;
-                lvi.SubItems[0].ForeColor = Color.FromArgb(44, 62, 80); // Dark slate
+                lvi.SubItems[0].ForeColor = Color.FromArgb(44, 62, 80); 
                 lvi.SubItems[1].ForeColor = Color.FromArgb(44, 62, 80);
-                lvi.SubItems[2].ForeColor = Color.FromArgb(192, 57, 43); // Bold Alizarin Red
+                lvi.SubItems[2].ForeColor = Color.FromArgb(192, 57, 43); 
                 lvi.SubItems[2].Font = new Font(listView.Font, FontStyle.Bold);
                 lvi.SubItems[3].ForeColor = Color.FromArgb(44, 62, 80);
             } else if (severity == Severity.Medium) {
-                // Medium Severity - Active Reader (Pumpkin Orange)
                 lvi.ForeColor = Color.Black;
                 lvi.SubItems[0].ForeColor = Color.FromArgb(44, 62, 80);
                 lvi.SubItems[1].ForeColor = Color.FromArgb(44, 62, 80);
-                lvi.SubItems[2].ForeColor = Color.FromArgb(211, 84, 0); // Bold Pumpkin Orange
+                lvi.SubItems[2].ForeColor = Color.FromArgb(211, 84, 0); 
                 lvi.SubItems[2].Font = new Font(listView.Font, FontStyle.Bold);
                 lvi.SubItems[3].ForeColor = Color.FromArgb(44, 62, 80);
             } else {
-                // Low Severity - Benign Usage (Muted Gray & Emerald Green)
-                // Fades benign rows to immediately highlight severe blockers
                 lvi.ForeColor = Color.Gray;
                 lvi.SubItems[0].ForeColor = Color.Gray;
                 lvi.SubItems[1].ForeColor = Color.Gray;
-                lvi.SubItems[2].ForeColor = Color.FromArgb(39, 174, 96); // Soft Emerald Green
+                lvi.SubItems[2].ForeColor = Color.FromArgb(39, 174, 96); 
                 lvi.SubItems[2].Font = new Font(listView.Font, FontStyle.Bold);
                 lvi.SubItems[3].ForeColor = Color.Gray;
             }
@@ -811,6 +825,39 @@ public class UnlockerForm : Form {
         UpdateButtonStates();
     }
 
+    private static bool MatchesDosPath(string candidatePath, TargetMatchInfo info) {
+        if (info.IsDir) {
+            return candidatePath.StartsWith(info.NormalizedPath, StringComparison.OrdinalIgnoreCase) ||
+                   candidatePath.Equals(info.OriginalPath, StringComparison.OrdinalIgnoreCase);
+        }
+        return candidatePath.Equals(info.OriginalPath, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool MatchesDeviceOrDosPath(string candidatePath, TargetMatchInfo info) {
+        if (candidatePath.StartsWith(@"\Device\", StringComparison.OrdinalIgnoreCase)) {
+            return candidatePath.StartsWith(info.DevicePathWithSlash, StringComparison.OrdinalIgnoreCase) ||
+                   candidatePath.Equals(info.TargetDevicePath, StringComparison.OrdinalIgnoreCase);
+        }
+        return MatchesDosPath(candidatePath, info);
+    }
+
+    private static int FindNetworkTailIndex(string normalizedObjName) {
+        int idx = normalizedObjName.IndexOf("\\mup\\", StringComparison.OrdinalIgnoreCase);
+        if (idx >= 0) return idx + 5;
+
+        idx = normalizedObjName.IndexOf("\\lanmanredirector\\", StringComparison.OrdinalIgnoreCase);
+        if (idx >= 0) {
+            idx += 18;
+            if (idx < normalizedObjName.Length && normalizedObjName[idx] == ';') {
+                int slash = normalizedObjName.IndexOf('\\', idx);
+                if (slash < 0) return -1;
+                idx = slash + 1;
+            }
+            return idx;
+        }
+        return -1;
+    }
+
     private static bool IsPathStrictlyLocked(string path) {
         uint shareMode = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
         IntPtr handle = CreateFile(path, DELETE_ACCESS | GENERIC_WRITE, shareMode, IntPtr.Zero, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, IntPtr.Zero);
@@ -820,9 +867,9 @@ public class UnlockerForm : Form {
         }
 
         int err = Marshal.GetLastWin32Error();
-        if (err == 32 || err == 33) return true; // SHARING_VIOLATION or LOCK_VIOLATION
+        if (err == 32 || err == 33) return true; 
 
-        if (err == 5) { // ACCESS_DENIED fallback check
+        if (err == 5) { 
             handle = CreateFile(path, DELETE_ACCESS, shareMode, IntPtr.Zero, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, IntPtr.Zero);
             if (handle != INVALID_HANDLE_VALUE) {
                 CloseHandle(handle);
@@ -832,6 +879,85 @@ public class UnlockerForm : Form {
             if (err == 32 || err == 33) return true;
         }
         return false;
+    }
+
+    private static List<string> GetProcessModules(int pid) {
+        var modules = new List<string>();
+        IntPtr hSnap = INVALID_HANDLE_VALUE;
+        
+        // 1. Toolhelp Module Resolver
+        for (int i = 0; i < 3; i++) {
+            hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, (uint)pid);
+            if (hSnap != INVALID_HANDLE_VALUE) break;
+            
+            int err = Marshal.GetLastWin32Error();
+            if (err != 0x1A8) // ERROR_BAD_LENGTH
+                break;
+            
+            Thread.Sleep(5);
+        }
+
+        if (hSnap != INVALID_HANDLE_VALUE) {
+            try {
+                MODULEENTRY32 modEntry = new MODULEENTRY32();
+                modEntry.dwSize = (uint)Marshal.SizeOf(typeof(MODULEENTRY32));
+                if (Module32First(hSnap, ref modEntry)) {
+                    do {
+                        if (!string.IsNullOrEmpty(modEntry.szExePath)) {
+                            modules.Add(modEntry.szExePath);
+                        }
+                    } while (Module32Next(hSnap, ref modEntry));
+                }
+            } catch {
+            } finally {
+                CloseHandle(hSnap);
+            }
+
+            if (modules.Count > 0) return modules;
+        }
+
+        // Direct Address Space Walk + GetMappedFileName (only when the Toolhelp snapshot failed,
+        // e.g. protected processes; walking every region of every process is far too slow otherwise)
+        IntPtr hProcess = OpenProcess(0x1000, false, pid); // PROCESS_QUERY_LIMITED_INFORMATION
+        if (hProcess == IntPtr.Zero) {
+            hProcess = OpenProcess(0x0400, false, pid); // Fallback to PROCESS_QUERY_INFORMATION
+        }
+
+        if (hProcess != IntPtr.Zero) {
+            try {
+                long address = 0;
+                long maxAddress = IntPtr.Size == 8 ? 0x7FFFFFFFFFFFFFFF : 0x7FFFFFFF;
+                MEMORY_BASIC_INFORMATION mbi = new MEMORY_BASIC_INFORMATION();
+                IntPtr mbiSize = (IntPtr)Marshal.SizeOf(typeof(MEMORY_BASIC_INFORMATION));
+                StringBuilder pathBuilder = new StringBuilder(1024);
+
+                while (address < maxAddress) {
+                    IntPtr result = VirtualQueryEx(hProcess, (IntPtr)address, out mbi, mbiSize);
+                    if (result == IntPtr.Zero || (long)result == 0) {
+                        break;
+                    }
+
+                    if (mbi.State == 0x1000 && (mbi.Type == 0x1000000 || mbi.Type == 0x40000)) {
+                        int len = GetMappedFileName(hProcess, mbi.BaseAddress, pathBuilder, pathBuilder.Capacity);
+                        if (len > 0) {
+                            string mappedPath = pathBuilder.ToString();
+                            if (!string.IsNullOrEmpty(mappedPath)) {
+                                modules.Add(mappedPath);
+                            }
+                        }
+                    }
+
+                    long nextAddress = (long)mbi.BaseAddress + (long)mbi.RegionSize;
+                    if (nextAddress <= address) break; 
+                    address = nextAddress;
+                }
+            } catch {
+            } finally {
+                CloseHandle(hProcess);
+            }
+        }
+
+        return modules;
     }
 
     private List<ProcessItem> RunFastHandleScan(HashSet<string> targets, bool forceRefresh, Action<int> progressCallback) {
@@ -874,13 +1000,25 @@ public class UnlockerForm : Form {
                     IsDir = isDir,
                     IsNetwork = isNetwork,
                     networkSearchPath = networkSearchPath,
-                    TargetDevicePath = targetDevicePath,
+                    TargetDevicePath = targetDevicePath.TrimEnd('\\', '/'),
                     DevicePathWithSlash = devicePathWithSlash
                 });
             } catch { }
         }
 
         if (targetList.Count == 0) return new List<ProcessItem>();
+
+        var pathLockCache = new ConcurrentDictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+        bool allTargetsAreFiles = true;
+
+        foreach (var info in targetList) {
+            if (!info.IsDir) {
+                string probeKey = info.OriginalPath.TrimEnd('\\', '/');
+                pathLockCache[probeKey] = IsPathStrictlyLocked(probeKey);
+            } else {
+                allTargetsAreFiles = false;
+            }
+        }
 
         // Tier 1: Process Executable Paths
         lock (CacheLock) {
@@ -889,16 +1027,12 @@ public class UnlockerForm : Form {
                 string procPath = kvp.Value;
                 if (procPath != null) {
                     foreach (var info in targetList) {
-                        bool match = info.IsDir ? 
-                            (procPath.StartsWith(info.NormalizedPath, StringComparison.OrdinalIgnoreCase) || procPath.Equals(info.OriginalPath, StringComparison.OrdinalIgnoreCase)) :
-                            procPath.Equals(info.OriginalPath, StringComparison.OrdinalIgnoreCase);
-
-                        if (match && addedPids.Add(pid)) {
+                        if (MatchesDosPath(procPath, info) && addedPids.Add(pid)) {
                             ProcessItem pItem = new ProcessItem {
                                 Pid = pid,
                                 Name = GetProcessName(pid),
                                 Path = procPath,
-                                GrantedAccess = 0x0012019f, // Active Executable Lock
+                                GrantedAccess = 0x0012019f, 
                                 IsDir = info.IsDir
                             };
                             finalLockingProcesses[pid] = pItem;
@@ -910,7 +1044,67 @@ public class UnlockerForm : Form {
         }
         progressCallback(20);
 
-        // Tier 2: System Handles Map
+        // Tier 2: Process Loaded Modules (DLLs & Mapped Sections)
+        List<int> activePids;
+        lock (CacheLock) {
+            activePids = new List<int>(ProcessNameMap.Keys);
+        }
+
+        int currentPid = Process.GetCurrentProcess().Id;
+        object lockObj = new object();
+
+        Parallel.ForEach(activePids, new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount * 2 }, delegate(int pid) {
+            if (pid <= 4 || pid == currentPid) return;
+
+            List<string> modules = GetProcessModules(pid);
+            if (modules.Count > 0) {
+                foreach (string modPath in modules) {
+                    if (string.IsNullOrEmpty(modPath)) continue;
+
+                    bool matched = false;
+                    foreach (var info in targetList) {
+                        if (MatchesDeviceOrDosPath(modPath, info)) {
+                            matched = true;
+                            lock (lockObj) {
+                                ProcessItem pItem;
+                                if (!finalLockingProcesses.TryGetValue(pid, out pItem)) {
+                                    pItem = new ProcessItem {
+                                        Pid = pid,
+                                        Name = GetProcessName(pid),
+                                        Path = GetProcessPath(pid) ?? "Unknown System Component",
+                                        GrantedAccess = 0,
+                                        IsDir = info.IsDir,
+                                        IsModuleLock = true
+                                    };
+                                    finalLockingProcesses[pid] = pItem;
+                                } else {
+                                    pItem.IsModuleLock = true;
+                                }
+                            }
+                            break;
+                        }
+                    }
+                    if (matched) break;
+                }
+            }
+        });
+        progressCallback(45);
+
+        // Tier 3: System Handles Map
+        bool anyTargetStrictlyLocked = false;
+        foreach (KeyValuePair<string, bool> probe in pathLockCache) {
+            if (probe.Value) {
+                anyTargetStrictlyLocked = true;
+                break;
+            }
+        }
+
+        if (allTargetsAreFiles && !anyTargetStrictlyLocked) {
+            Log("Fast-skip: no target file is strictly locked; skipping system handle table scan.");
+            progressCallback(100);
+            return new List<ProcessItem>(finalLockingProcesses.Values);
+        }
+
         int bufferSize = 0x10000;
         IntPtr buffer = Marshal.AllocHGlobal(bufferSize);
         int length = 0;
@@ -927,22 +1121,26 @@ public class UnlockerForm : Form {
             return new List<ProcessItem>(finalLockingProcesses.Values);
         }
 
-        progressCallback(40);
+        progressCallback(55);
 
         bool is64Bit = Marshal.SizeOf(typeof(IntPtr)) == 8;
         long handleCount = is64Bit ? Marshal.ReadInt64(buffer) : Marshal.ReadInt32(buffer);
         IntPtr ptr = new IntPtr(buffer.ToInt64() + (is64Bit ? 16 : 8));
         int entrySize = is64Bit ? 40 : 28;
 
+        HashSet<int> livePids;
+        lock (CacheLock) {
+            livePids = new HashSet<int>(ProcessNameMap.Keys);
+        }
+
         var handlesByPid = new Dictionary<int, List<HandleInfo>>();
-        int currentPid = Process.GetCurrentProcess().Id;
 
         for (long i = 0; i < handleCount; i++) {
             int pid = is64Bit ? (int)Marshal.ReadInt64(ptr, 8) : Marshal.ReadInt32(ptr, 4);
             ushort objTypeIndex = (ushort)Marshal.ReadInt16(ptr, is64Bit ? 30 : 18);
             uint grantedAccess = (uint)Marshal.ReadInt32(ptr, is64Bit ? 24 : 12);
             
-            if (pid != currentPid && pid > 0 && (CachedFileTypeIndex == 0 || objTypeIndex == CachedFileTypeIndex)) {
+            if (pid != currentPid && pid > 0 && livePids.Contains(pid) && (CachedFileTypeIndex == 0 || objTypeIndex == CachedFileTypeIndex)) {
                 IntPtr handleValue = is64Bit ? Marshal.ReadIntPtr(ptr, 16) : Marshal.ReadIntPtr(ptr, 8);
                 if (!handlesByPid.ContainsKey(pid)) handlesByPid[pid] = new List<HandleInfo>();
                 
@@ -957,119 +1155,148 @@ public class UnlockerForm : Form {
         }
 
         Marshal.FreeHGlobal(buffer);
-        progressCallback(50);
+        progressCallback(65);
 
+        var scanQueue = new ConcurrentQueue<KeyValuePair<int, HandleInfo>>();
+        foreach (KeyValuePair<int, List<HandleInfo>> kvp in handlesByPid) {
+            foreach (HandleInfo hInfo in kvp.Value) {
+                scanQueue.Enqueue(new KeyValuePair<int, HandleInfo>(kvp.Key, hInfo));
+            }
+        }
+
+        int total = scanQueue.Count;
         int processed = 0;
-        int total = handlesByPid.Count;
         IntPtr currentProcessHandle = GetCurrentProcess();
-        object lockObj = new object();
-        ConcurrentDictionary<string, bool> pathLockCache = new ConcurrentDictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+        bool timeUp = false;
 
-        Parallel.ForEach(handlesByPid, new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount * 2 }, delegate(KeyValuePair<int, List<HandleInfo>> kvp) {
-            int pid = kvp.Key;
-            Interlocked.Increment(ref processed);
-            if (processed % 10 == 0) progressCallback(50 + (int)((processed / (float)total) * 45));
+        Action<KeyValuePair<int, HandleInfo>> processHandle = delegate(KeyValuePair<int, HandleInfo> pair) {
+            int pid = pair.Key;
+            HandleInfo hInfo = pair.Value;
 
             IntPtr hProcess = OpenProcess(PROCESS_DUP_HANDLE, false, pid);
             if (hProcess == IntPtr.Zero) return;
 
             try {
-                foreach (var hInfo in kvp.Value) {
-                    IntPtr dupHandle = IntPtr.Zero;
-                    if (DuplicateHandle(hProcess, hInfo.HandleValue, currentProcessHandle, out dupHandle, 0, false, DUPLICATE_SAME_ACCESS)) {
-                        try {
-                            if (GetFileType(dupHandle) == FILE_TYPE_DISK) {
-                                string objName = GetObjectNameSafe(dupHandle); 
-                                if (!string.IsNullOrEmpty(objName)) {
-                                    
-                                    foreach (var info in targetList) {
-                                        bool match = false;
-                                        if (info.IsNetwork) {
-                                            string normalizedObj = objName.Replace('/', '\\');
+                IntPtr dupHandle = IntPtr.Zero;
+                if (DuplicateHandle(hProcess, hInfo.HandleValue, currentProcessHandle, out dupHandle, 0, false, DUPLICATE_SAME_ACCESS)) {
+                    try {
+                        if (GetFileType(dupHandle) == FILE_TYPE_DISK) {
+                            string objName = GetObjectNameInternal(dupHandle); 
+                            if (!string.IsNullOrEmpty(objName)) {
+                                
+                                foreach (var info in targetList) {
+                                    bool match = false;
+                                    string relSuffix = null;
+
+                                    if (info.IsNetwork) {
+                                        string normalizedObj = objName.Replace('/', '\\');
+                                        int tailIdx = FindNetworkTailIndex(normalizedObj);
+                                        if (tailIdx >= 0) {
+                                            string tail = normalizedObj.Substring(tailIdx).TrimEnd('\\', '/');
                                             if (info.IsDir) {
-                                                match = normalizedObj.EndsWith("\\" + info.networkSearchPath, StringComparison.OrdinalIgnoreCase) || 
-                                                        normalizedObj.IndexOf("\\" + info.networkSearchPath + "\\", StringComparison.OrdinalIgnoreCase) >= 0;
+                                                match = tail.Equals(info.networkSearchPath, StringComparison.OrdinalIgnoreCase) ||
+                                                        tail.StartsWith(info.networkSearchPath + "\\", StringComparison.OrdinalIgnoreCase);
                                             } else {
-                                                match = normalizedObj.EndsWith("\\" + info.networkSearchPath, StringComparison.OrdinalIgnoreCase);
+                                                match = tail.Equals(info.networkSearchPath, StringComparison.OrdinalIgnoreCase);
                                             }
-                                        } else {
-                                            match = info.IsDir ? 
-                                                (objName.StartsWith(info.DevicePathWithSlash, StringComparison.OrdinalIgnoreCase) || objName.Equals(info.TargetDevicePath, StringComparison.OrdinalIgnoreCase)) :
-                                                objName.Equals(info.TargetDevicePath, StringComparison.OrdinalIgnoreCase);
-                                        }
-
-                                        if (match) {
-                                            string dosPath = info.OriginalPath;
-                                            if (!info.IsNetwork) {
-                                                if (objName.StartsWith(info.DevicePathWithSlash, StringComparison.OrdinalIgnoreCase)) {
-                                                    dosPath = info.OriginalPath.TrimEnd('\\', '/') + "\\" + objName.Substring(info.DevicePathWithSlash.Length);
-                                                } else if (objName.Equals(info.TargetDevicePath, StringComparison.OrdinalIgnoreCase)) {
-                                                    dosPath = info.OriginalPath.TrimEnd('\\', '/');
-                                                }
-                                            }
-
-                                            bool isStrictlyLocked = pathLockCache.GetOrAdd(dosPath, delegate(string p) { return IsPathStrictlyLocked(p); });
-                                            if (isStrictlyLocked) {
-                                                lock (lockObj) {
-                                                    ProcessItem item;
-                                                    if (!finalLockingProcesses.TryGetValue(pid, out item)) {
-                                                        item = new ProcessItem {
-                                                            Pid = pid,
-                                                            Name = GetProcessName(pid),
-                                                            Path = GetProcessPath(pid) ?? "Unknown System Component",
-                                                            GrantedAccess = hInfo.GrantedAccess,
-                                                            IsDir = info.IsDir
-                                                        };
-                                                        finalLockingProcesses[pid] = item;
-                                                    } else {
-                                                        if (hInfo.GrantedAccess > item.GrantedAccess) {
-                                                            item.GrantedAccess = hInfo.GrantedAccess;
-                                                        }
-                                                    }
-                                                    item.Handles.Add(hInfo.HandleValue);
-                                                }
-                                                break; 
+                                            if (match && tail.Length > info.networkSearchPath.Length) {
+                                                relSuffix = tail.Substring(info.networkSearchPath.Length).TrimStart('\\', '/');
                                             }
                                         }
+                                    } else if (objName.StartsWith(info.DevicePathWithSlash, StringComparison.OrdinalIgnoreCase)) {
+                                        match = true;
+                                        relSuffix = objName.Substring(info.DevicePathWithSlash.Length).TrimStart('\\', '/');
+                                    } else if (objName.Equals(info.TargetDevicePath, StringComparison.OrdinalIgnoreCase)) {
+                                        match = true;
+                                        relSuffix = null;
+                                    }
+
+                                    if (!match) continue;
+
+                                    string baseDosPath = info.OriginalPath.TrimEnd('\\', '/');
+                                    string dosPath = string.IsNullOrEmpty(relSuffix) ? baseDosPath : baseDosPath + "\\" + relSuffix;
+
+                                    bool isStrictlyLocked = pathLockCache.GetOrAdd(dosPath, delegate(string p) { return IsPathStrictlyLocked(p); });
+                                    if (isStrictlyLocked) {
+                                        lock (lockObj) {
+                                            ProcessItem item;
+                                            if (!finalLockingProcesses.TryGetValue(pid, out item)) {
+                                                item = new ProcessItem {
+                                                    Pid = pid,
+                                                    Name = GetProcessName(pid),
+                                                    Path = GetProcessPath(pid) ?? "Unknown System Component",
+                                                    GrantedAccess = hInfo.GrantedAccess,
+                                                    IsDir = info.IsDir
+                                                };
+                                                finalLockingProcesses[pid] = item;
+                                            } else {
+                                                if (hInfo.GrantedAccess > item.GrantedAccess) {
+                                                    item.GrantedAccess = hInfo.GrantedAccess;
+                                                }
+                                            }
+                                            item.Handles.Add(hInfo.HandleValue);
+                                        }
+                                        break; 
                                     }
                                 }
                             }
-                        } finally {
-                            CloseHandle(dupHandle);
                         }
+                    } finally {
+                        CloseHandle(dupHandle);
                     }
                 }
             } catch {
             } finally {
                 CloseHandle(hProcess);
             }
-        });
+        };
+
+        int workerCount = Math.Max(16, Math.Min(64, Environment.ProcessorCount * 4));
+        var workers = new List<Thread>();
+        for (int w = 0; w < workerCount; w++) {
+            var worker = new Thread(delegate() {
+                KeyValuePair<int, HandleInfo> pair;
+                while (!timeUp && scanQueue.TryDequeue(out pair)) {
+                    try { processHandle(pair); } catch { }
+                    int done = Interlocked.Increment(ref processed);
+                    if (done % 25 == 0) progressCallback(total > 0 ? 65 + (int)((done / (float)total) * 30) : 65);
+                }
+            });
+            worker.IsBackground = true;
+            workers.Add(worker);
+            worker.Start();
+        }
+
+        DateTime handleScanStart = DateTime.UtcNow;
+        foreach (Thread worker in workers) {
+            int remainMs = 20000 - (int)(DateTime.UtcNow - handleScanStart).TotalMilliseconds;
+            if (remainMs <= 0 || !worker.Join(remainMs)) { timeUp = true; break; }
+        }
+        timeUp = true;
 
         progressCallback(100);
         return new List<ProcessItem>(finalLockingProcesses.Values);
     }
 
-    private static string GetObjectNameSafe(IntPtr handle) {
-        var task = Task.Factory.StartNew(delegate { return GetObjectNameInternal(handle); });
-        if (task.Wait(100)) return task.Result; 
-        return null; 
-    }
-
     private static string GetObjectNameInternal(IntPtr handle) {
-        int length = 2048;
-        IntPtr buffer = Marshal.AllocHGlobal(length);
+        int bufferSize = 2048;
+        IntPtr buffer = Marshal.AllocHGlobal(bufferSize);
         try {
-            int status = NtQueryObject(handle, 1, buffer, length, ref length); // 1 = ObjectNameInformation
+            int length = bufferSize;
+            int status = NtQueryObject(handle, 1, buffer, bufferSize, ref length); 
             if (status == unchecked((int)0xC0000004) || status == unchecked((int)0x80000005)) { 
                 Marshal.FreeHGlobal(buffer);
-                buffer = Marshal.AllocHGlobal(length);
-                status = NtQueryObject(handle, 1, buffer, length, ref length);
+                bufferSize = length > 0 ? length : bufferSize * 2;
+                buffer = Marshal.AllocHGlobal(bufferSize);
+                length = bufferSize;
+                status = NtQueryObject(handle, 1, buffer, bufferSize, ref length);
             }
             if (status >= 0) {
-                int nameLength = Marshal.ReadInt16(buffer);
-                if (nameLength > 0) {
-                    IntPtr namePtr = Marshal.SizeOf(typeof(IntPtr)) == 8 ? Marshal.ReadIntPtr(buffer, 8) : Marshal.ReadIntPtr(buffer, 4);
-                    if (namePtr != IntPtr.Zero) return Marshal.PtrToStringUni(namePtr, nameLength / 2);
+                bool is64 = Marshal.SizeOf(typeof(IntPtr)) == 8;
+                int headerSize = is64 ? 16 : 8;
+                int nameLength = Marshal.ReadInt16(buffer, 0);
+                if (nameLength > 0 && nameLength <= bufferSize - headerSize) {
+                    return Marshal.PtrToStringUni(new IntPtr(buffer.ToInt64() + headerSize), nameLength / 2);
                 }
             }
         } catch {
@@ -1189,13 +1416,168 @@ public class UnlockerForm : Form {
         }
     }
 
+    private void ResetFilePermissions(string path) {
+        try {
+            using (var p = new Process()) {
+                p.StartInfo.FileName = "takeown.exe";
+                p.StartInfo.Arguments = "/F \"" + path + "\" /A"; 
+                p.StartInfo.CreateNoWindow = true;
+                p.StartInfo.UseShellExecute = false;
+                p.Start();
+                p.WaitForExit(3000);
+            }
+
+            using (var p = new Process()) {
+                p.StartInfo.FileName = "icacls.exe";
+                p.StartInfo.Arguments = "\"" + path + "\" /grant *S-1-5-32-544:F *S-1-5-32-545:F /T /C"; 
+                p.StartInfo.CreateNoWindow = true;
+                p.StartInfo.UseShellExecute = false;
+                p.Start();
+                p.WaitForExit(3000);
+            }
+        } catch { }
+    }
+
+    private static string GetSystemErrorMessage(int errCode) {
+        switch (errCode) {
+            case 2: return "File not found (ERROR_FILE_NOT_FOUND).";
+            case 3: return "Path not found (ERROR_PATH_NOT_FOUND).";
+            case 5: return "Access is denied (ERROR_ACCESS_DENIED). This means write permissions are restricted, the file is read-only, or administrator execution privileges are missing.";
+            case 18: return "No more files left to analyze (ERROR_NO_MORE_FILES).";
+            case 32: return "The file is being used by another active process (ERROR_SHARING_VIOLATION).";
+            case 33: return "The file is locked by another active process (ERROR_LOCK_VIOLATION).";
+            case 145: return "The directory is not empty (ERROR_DIR_NOT_EMPTY).";
+            default: return "Unknown Windows Win32 Error.";
+        }
+    }
+
+    private void ForceDeleteTargets() {
+        if (targetPaths.Count == 0) {
+            MessageBox.Show("No files or folders are currently loaded to delete.", "No Targets", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+
+        var sbConfirm = new StringBuilder();
+        sbConfirm.AppendLine("This will attempt to permanently delete the following target(s):");
+        foreach (var p in targetPaths) {
+            sbConfirm.AppendLine("• " + p);
+        }
+        sbConfirm.AppendLine();
+        sbConfirm.AppendLine("UnBlock will attempt to:");
+        sbConfirm.AppendLine("1. Forcibly terminate all processes holding locks on these files.");
+        sbConfirm.AppendLine("2. Strip Read-Only attributes & reset ACL security permissions.");
+        sbConfirm.AppendLine("3. Instantly delete the files/directories.");
+        sbConfirm.AppendLine("4. Register 'Delete-on-Reboot' as a fallback if immediate deletion fails.");
+        sbConfirm.AppendLine();
+        sbConfirm.AppendLine("Proceed with force-deletion?");
+
+        if (MessageBox.Show(sbConfirm.ToString(), "Force Delete Targets?", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) {
+            return;
+        }
+
+        foreach (var pi in currentScanResults) {
+            if (pi != null && pi.Pid != 4) {
+                KillProcessSafely(pi.Pid, pi.Name);
+            }
+        }
+
+        var report = new StringBuilder();
+        bool anyFailedImmediate = false;
+
+        foreach (string rawPath in targetPaths) {
+            string path = rawPath.Trim();
+            if (string.IsNullOrEmpty(path)) continue;
+
+            report.AppendLine("Processing: " + path);
+
+            bool exists = File.Exists(path) || Directory.Exists(path);
+            if (!exists) {
+                report.AppendLine("  -> File/Folder does not exist or was already deleted.");
+                report.AppendLine();
+                continue;
+            }
+
+            try {
+                File.SetAttributes(path, FileAttributes.Normal);
+            } catch (Exception ex) {
+                report.AppendLine("  [Warning] Failed to clear file attributes: " + ex.Message);
+            }
+
+            if (isAdmin) {
+                try {
+                    ResetFilePermissions(path);
+                    report.AppendLine("  [Success] Security permissions updated.");
+                } catch (Exception ex) {
+                    report.AppendLine("  [Warning] Could not reset permissions: " + ex.Message);
+                }
+            }
+
+            try {
+                bool success = false;
+                int win32Err = 0;
+
+                if (Directory.Exists(path)) {
+                    success = RemoveDirectory(path);
+                    if (!success) {
+                        win32Err = Marshal.GetLastWin32Error();
+                        if (win32Err == 145) { // ERROR_DIR_NOT_EMPTY
+                            try {
+                                Directory.Delete(path, true);
+                                success = true;
+                            } catch (Exception exDir) {
+                                win32Err = Marshal.GetHRForException(exDir) & 0xFFFF;
+                            }
+                        }
+                    }
+                } else {
+                    success = DeleteFile(path);
+                    if (!success) {
+                        win32Err = Marshal.GetLastWin32Error();
+                    }
+                }
+
+                if (success) {
+                    report.AppendLine("  [Success] File/Folder deleted successfully.");
+                } else {
+                    anyFailedImmediate = true;
+                    report.AppendLine("  [Failed] Immediate deletion failed.");
+                    report.AppendLine("  [System Error Code] " + win32Err + " - " + GetSystemErrorMessage(win32Err));
+
+                    if (isAdmin) {
+                        bool rebootRegistered = MoveFileEx(path, null, MOVEFILE_DELAY_UNTIL_REBOOT);
+                        if (rebootRegistered) {
+                            report.AppendLine("  [Success] Scheduled for permanent deletion on next reboot.");
+                        } else {
+                            int rebootErr = Marshal.GetLastWin32Error();
+                            report.AppendLine("  [Failed] Could not schedule for reboot deletion (Error: " + rebootErr + ").");
+                        }
+                    } else {
+                        report.AppendLine("  [Error] Standard user privileges cannot schedule reboot deletion.");
+                    }
+                }
+            } catch (Exception ex) {
+                anyFailedImmediate = true;
+                int win32Err = Marshal.GetHRForException(ex) & 0xFFFF;
+                report.AppendLine("  [Failed] Immediate deletion failed with exception: " + ex.Message);
+                report.AppendLine("  [System Error Code] " + win32Err + " - " + GetSystemErrorMessage(win32Err));
+            }
+            report.AppendLine();
+        }
+
+        string title = anyFailedImmediate ? "Deletion Summary (Immediate Action Failed)" : "Deletion Successful";
+        var icon = anyFailedImmediate ? MessageBoxIcon.Warning : MessageBoxIcon.Information;
+        
+        MessageBox.Show(report.ToString(), title, MessageBoxButtons.OK, icon);
+        StartAsyncScan(true);
+    }
+
     private void BtnUnlock_Click(object sender, EventArgs e) {
         if (listView.SelectedItems.Count == 0) return;
         var item = listView.SelectedItems[0].Tag as ProcessItem;
         if (item == null) return;
 
-        if (item.Handles.Count == 0) {
-            MessageBox.Show("This process is executing directly from the target folder. It cannot be unlocked; it must be terminated.", "Cannot Unlock", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        if (item.Handles.Count == 0 || item.IsModuleLock) {
+            MessageBox.Show("This file or directory is loaded directly as a running process, DLL, or mapped module. It cannot be unlocked by closing handles; you must terminate the process to free it.", "Cannot Unlock", MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
 
@@ -1214,7 +1596,7 @@ public class UnlockerForm : Form {
         
         foreach (var pi in currentScanResults) {
             if (pi != null) {
-                if (pi.Handles.Count == 0) hasProcessExecs = true;
+                if (pi.Handles.Count == 0 || pi.IsModuleLock) hasProcessExecs = true;
                 else if (!UnlockSafely(pi.Pid, pi.Handles, pi.Name)) failedAny = true;
             }
         }
@@ -1223,7 +1605,7 @@ public class UnlockerForm : Form {
             MessageBox.Show("All compatible handles successfully closed.", "Success", MessageBoxButtons.OK, MessageBoxIcon.Information);
             StartAsyncScan(true); 
         } else if (hasProcessExecs && !failedAny) {
-            MessageBox.Show("Closed active handles, but some processes are executing directly from a target folder and must be terminated manually.", "Partial Success", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            MessageBox.Show("Closed active handles, but some processes are executing directly or loading DLLs from a target folder and must be terminated manually.", "Partial Success", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             StartAsyncScan(true);
         } else {
             if (!isAdmin) PromptForElevation();
@@ -1273,21 +1655,29 @@ public class UnlockerForm : Form {
         }
     }
 
+    private void BtnForceDelete_Click(object sender, EventArgs e) {
+        ForceDeleteTargets();
+    }
+
+    private void BtnElevate_Click(object sender, EventArgs e) {
+        PromptForElevation();
+    }
+
     private void PromptForElevation() {
-        if (MessageBox.Show("Administrative privileges are highly recommended to modify this process.\n\nRestart UnBlock as Administrator?", "Elevation Recommended", MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes) {
-            try {
-                ProcessStartInfo psi = new ProcessStartInfo();
-                psi.FileName = Application.ExecutablePath;
-                
-                StringBuilder argsBuilder = new StringBuilder();
-                foreach (string path in targetPaths) {
-                    argsBuilder.AppendFormat("\"{0}\" ", path);
-                }
-                psi.Arguments = argsBuilder.ToString().TrimEnd();
-                psi.Verb = "runas";
-                Process.Start(psi);
-                this.Close();
-            } catch { }
+        try {
+            ProcessStartInfo psi = new ProcessStartInfo();
+            psi.FileName = Application.ExecutablePath;
+            
+            StringBuilder argsBuilder = new StringBuilder();
+            foreach (string path in targetPaths) {
+                argsBuilder.AppendFormat("\"{0}\" ", path);
+            }
+            psi.Arguments = argsBuilder.ToString().TrimEnd();
+            psi.Verb = "runas";
+            Process.Start(psi);
+            this.Close();
+        } catch (Exception ex) {
+            MessageBox.Show("Elevation failed: " + ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
     }
 
@@ -1301,20 +1691,18 @@ public class UnlockerForm : Form {
 
     private static void RunWatcherMode(string targetDir) {
         string targetExe = Path.Combine(targetDir, "Unlocker.exe");
-        bool keysCurrentlyRegistered = true; // Assume they exist when PC boots
+        bool keysCurrentlyRegistered = true; 
         
         while (true) {
-            Thread.Sleep(2000); // Check every 2 seconds
+            Thread.Sleep(2000); 
             
             bool isAppAvailable = File.Exists(targetExe);
             
             if (isAppAvailable && !keysCurrentlyRegistered) {
-                // The drive was plugged back in! Restore the right-click menus.
                 RestoreRegistryKeys(targetExe);
                 keysCurrentlyRegistered = true;
             } 
             else if (!isAppAvailable && keysCurrentlyRegistered) {
-                // The drive is unplugged. Hide the right-click menus temporarily.
                 CleanRegistryOnly();
                 keysCurrentlyRegistered = false;
             }
@@ -1324,13 +1712,9 @@ public class UnlockerForm : Form {
     private static void CleanRegistryOnly() {
         try {
             using (var baseKey = Microsoft.Win32.RegistryKey.OpenBaseKey(Microsoft.Win32.RegistryHive.LocalMachine, Microsoft.Win32.RegistryView.Registry64)) {
-                // Remove right-click menus temporarily
                 baseKey.DeleteSubKeyTree(@"SOFTWARE\Classes\*\shell\UnBlock", false);
                 baseKey.DeleteSubKeyTree(@"SOFTWARE\Classes\Directory\shell\UnBlock", false);
                 baseKey.DeleteSubKeyTree(@"SOFTWARE\Classes\Directory\Background\shell\UnBlock", false);
-                
-                // Note: We deliberately LEAVE the "Uninstall" key alone so you can 
-                // still officially uninstall it from Windows Settings if you want to!
             }
         } catch { }
     }
@@ -1388,14 +1772,12 @@ public class UnlockerForm : Form {
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
 
-        // Crisp programmatic rendering on high-res / scaled layouts
         try {
             if (Environment.OSVersion.Version.Major >= 6) {
                 SetProcessDPIAware();
             }
         } catch { }
 
-        // Determine if another instance is already running
         string appData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
         string pendingDir = Path.Combine(appData, "UnBlock\\Pending");
         Directory.CreateDirectory(pendingDir);
@@ -1405,7 +1787,6 @@ public class UnlockerForm : Form {
             singleInstanceMutex = new Mutex(true, "Global\\UnBlock_SingleInstance_Mutex", out createdNew);
         } catch (UnauthorizedAccessException) {
             try {
-                // Defensive Fallback Fix: Creates a Local Session Mutex if user has standard non-administrator privileges
                 singleInstanceMutex = new Mutex(true, "Local\\UnBlock_SingleInstance_Mutex", out createdNew);
             } catch {
                 createdNew = true;
@@ -1415,14 +1796,12 @@ public class UnlockerForm : Form {
         }
 
         if (!createdNew) {
-            // Another instance is running. Pass our target paths and terminate.
             if (args.Length > 0) {
                 try {
                     string tempBase = Path.Combine(pendingDir, Guid.NewGuid().ToString());
                     string tempWritePath = tempBase + ".tmp_write";
                     string tempFinalPath = tempBase + ".tmp";
                     
-                    // Atomic write-and-rename operation prevents target file lockouts
                     File.WriteAllLines(tempWritePath, args);
                     File.Move(tempWritePath, tempFinalPath);
                 } catch { }
@@ -1443,5 +1822,88 @@ public class UnlockerForm : Form {
             try { singleInstanceMutex.ReleaseMutex(); } catch { }
             singleInstanceMutex.Dispose();
         }
+    }
+}
+
+// ============================================================================
+// Top-Level Helper Classes, Structs, and Enums (File Scope)
+// Placed outside the Form class to ensure complete compiler type visibility.
+// ============================================================================
+
+public enum Severity {
+    Low,      // Benign / Green
+    Medium,   // Active Read / Orange
+    High      // Severe Write/Delete Lockout / Red
+}
+
+[StructLayout(LayoutKind.Sequential, CharSet = CharSet.Auto)]
+public struct PROCESSENTRY32 {
+    public uint dwSize;
+    public uint cntUsage;
+    public uint th32ProcessID;
+    public IntPtr th32DefaultHeapID;
+    public uint th32ModuleID;
+    public uint cntThreads;
+    public uint th32ParentProcessID;
+    public int pcPriClassBase;
+    public uint dwFlags;
+    [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)]
+    public string szExeFile;
+}
+
+[StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+public struct MODULEENTRY32 {
+    public uint dwSize;
+    public uint th32ModuleID;
+    public uint th32ProcessID;
+    public uint GlblcntUsage;
+    public uint ProccntUsage;
+    public IntPtr modBaseAddr;
+    public uint modBaseSize;
+    public IntPtr hModule;
+    [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 256)]
+    public string szModule;
+    [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)]
+    public string szExePath;
+}
+
+[StructLayout(LayoutKind.Sequential)]
+public struct MEMORY_BASIC_INFORMATION {
+    public IntPtr BaseAddress;
+    public IntPtr AllocationBase;
+    public uint AllocationProtect;
+    public IntPtr RegionSize;
+    public uint State;
+    public uint Protect;
+    public uint Type;
+}
+
+public struct HandleInfo {
+    public IntPtr HandleValue;
+    public ushort ObjectTypeIndex;
+    public uint GrantedAccess;
+}
+
+public class TargetMatchInfo {
+    public string OriginalPath { get; set; }
+    public string NormalizedPath { get; set; }
+    public bool IsDir { get; set; }
+    public bool IsNetwork { get; set; }
+    public string networkSearchPath { get; set; }
+    public string TargetDevicePath { get; set; }
+    public string DevicePathWithSlash { get; set; }
+}
+
+public class ProcessItem {
+    public int Pid { get; set; }
+    public string Name { get; set; }
+    public string Path { get; set; }
+    public uint GrantedAccess { get; set; }
+    public bool IsDir { get; set; }
+    public List<IntPtr> Handles { get; set; }
+    public bool IsModuleLock { get; set; }
+
+    public ProcessItem() {
+        Handles = new List<IntPtr>();
     }
 }
