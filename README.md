@@ -3,6 +3,9 @@
   <p>
     <b>Resolves "File in Use" and "Folder Access Denied" errors on Windows.</b>
   </p>
+  <p>
+    <a href="https://github.com/kuy124/UnBlock/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/kuy124/UnBlock/actions/workflows/ci.yml/badge.svg"></a>
+  </p>
 </div>
 
 <p align="center">
