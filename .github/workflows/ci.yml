@@ -21,6 +21,7 @@ jobs:
         shell: pwsh
         run: |
           $csc = Join-Path $env:WINDIR "Microsoft.NET\Framework64\v4.0.30319\csc.exe"
+          New-Item -ItemType Directory -Force -Path "artifacts" | Out-Null
           $src = Get-ChildItem -LiteralPath "src" -Filter "*.cs" | Where-Object { $_.Name -ne "Setup.cs" }
           $refs = @("/r:System.dll", "/r:System.Core.dll", "/r:System.Drawing.dll", "/r:System.Windows.Forms.dll")
           & $csc /nologo /target:winexe /optimize+ "/out:$PWD\artifacts\Unlocker.exe" $refs @($src.FullName)
