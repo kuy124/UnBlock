@@ -52,6 +52,7 @@ public partial class UnlockerForm : Form {
     private static readonly Dictionary<string, Icon> IconCache = new Dictionary<string, Icon>(StringComparer.OrdinalIgnoreCase);
     private static Icon defaultFileIcon;
     private static readonly object iconCacheLock = new object();
+
     public UnlockerForm(List<string> paths) {
         isInitializing = true; 
 
@@ -85,6 +86,7 @@ public partial class UnlockerForm : Form {
         UpdateTargetLabel();
         StartAsyncScan(false); 
     }
+
     private static void EnableDebugPrivilege() {
         IntPtr token;
         if (OpenProcessToken(GetCurrentProcess(), 0x0020 | 0x0008, out token)) {
@@ -105,6 +107,7 @@ public partial class UnlockerForm : Form {
             File.AppendAllText(logFile, DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + " - " + message + Environment.NewLine);
         } catch { } 
     }
+
     private void UpdateButtonStates() {
         bool scanning;
         lock (scanLock) { scanning = isScanning; }
@@ -257,6 +260,7 @@ public partial class UnlockerForm : Form {
             }
         }
     }
+
     private void StartAsyncScan(bool forceRefresh = false) {
         lock (scanLock) {
             if (isScanning) return; 
@@ -350,7 +354,6 @@ public partial class UnlockerForm : Form {
         uint grantedAccess = item.GrantedAccess;
         bool isDir = item.IsDir;
 
-        // Evaluate typical bitmask flags for read, write, and delete permissions
         bool hasWrite = (grantedAccess & 0x0002) != 0 || (grantedAccess & 0x0004) != 0 || (grantedAccess & 0x0100) != 0 || (grantedAccess & 0x00040000) != 0;
         bool hasDelete = (grantedAccess & 0x00010000) != 0;
         bool hasRead = (grantedAccess & 0x0001) != 0;
@@ -481,6 +484,7 @@ public partial class UnlockerForm : Form {
         listView.EndUpdate();
         UpdateButtonStates();
     }
+
     private bool UnlockSafely(int pid, List<IntPtr> handles, string name) {
         if (handles.Count == 0) return true;
         Log("Attempting to unlock handles for " + name + " (PID: " + pid + ")...");
@@ -546,12 +550,46 @@ public partial class UnlockerForm : Form {
         switch (errCode) {
             case 2: return "File not found (ERROR_FILE_NOT_FOUND).";
             case 3: return "Path not found (ERROR_PATH_NOT_FOUND).";
-            case 5: return "Access is denied (ERROR_ACCESS_DENIED). This means write permissions are restricted, the file is read-only, or administrator execution privileges are missing.";
+            case 5: return "Access is denied (ERROR_ACCESS_DENIED).";
             case 18: return "No more files left to analyze (ERROR_NO_MORE_FILES).";
             case 32: return "The file is being used by another active process (ERROR_SHARING_VIOLATION).";
             case 33: return "The file is locked by another active process (ERROR_LOCK_VIOLATION).";
             case 145: return "The directory is not empty (ERROR_DIR_NOT_EMPTY).";
-            default: return "Unknown Windows Win32 Error.";
+            default: return "Windows System Error Code " + errCode + ".";
+        }
+    }
+
+    private bool AttemptDelete(string path, out int win32Err, out string errorMsg) {
+        win32Err = 0;
+        errorMsg = null;
+
+        try {
+            if (Directory.Exists(path)) {
+                if (RemoveDirectory(path)) return true;
+                win32Err = Marshal.GetLastWin32Error();
+
+                // If directory deletion failed (e.g. not empty or locked files inside), recursively try removing contents
+                try {
+                    foreach (string file in Directory.GetFiles(path, "*", SearchOption.AllDirectories)) {
+                        try { File.SetAttributes(file, FileAttributes.Normal); } catch { }
+                    }
+                    Directory.Delete(path, true);
+                    return true;
+                } catch (Exception exDir) {
+                    win32Err = Marshal.GetHRForException(exDir) & 0xFFFF;
+                    errorMsg = exDir.Message;
+                    return false;
+                }
+            } else if (File.Exists(path)) {
+                if (DeleteFile(path)) return true;
+                win32Err = Marshal.GetLastWin32Error();
+                return false;
+            }
+            return true; // Already gone
+        } catch (Exception ex) {
+            win32Err = Marshal.GetHRForException(ex) & 0xFFFF;
+            errorMsg = ex.Message;
+            return false;
         }
     }
 
@@ -561,34 +599,47 @@ public partial class UnlockerForm : Form {
             return;
         }
 
-        var sbConfirm = new StringBuilder();
-        sbConfirm.AppendLine("This will attempt to permanently delete the following target(s):");
-        foreach (var p in targetPaths) {
-            sbConfirm.AppendLine("ΓÇó " + p);
-        }
-        sbConfirm.AppendLine();
-        sbConfirm.AppendLine("UnBlock will attempt to:");
-        sbConfirm.AppendLine("1. Forcibly terminate all processes holding locks on these files.");
-        sbConfirm.AppendLine("2. Strip Read-Only attributes & reset ACL security permissions.");
-        sbConfirm.AppendLine("3. Instantly delete the files/directories.");
-        sbConfirm.AppendLine("4. Register 'Delete-on-Reboot' as a fallback if immediate deletion fails.");
-        sbConfirm.AppendLine();
-        sbConfirm.AppendLine("Proceed with force-deletion?");
-
-        if (MessageBox.Show(sbConfirm.ToString(), "Force Delete Targets?", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) {
-            return;
-        }
-
+        // Check if locking processes are actively detected
+        bool hasLockingProcesses = false;
         foreach (var pi in currentScanResults) {
             if (pi != null && pi.Pid != 4) {
-                KillProcessSafely(pi.Pid, pi.Name);
+                hasLockingProcesses = true;
+                break;
+            }
+        }
+
+        if (hasLockingProcesses) {
+            string inUsePrompt = "This cannot be removed because an application is currently using it.\n\n" +
+                                 "Do you want to kill the locking process(es) first using UnBlock and delete it?";
+            DialogResult dr = MessageBox.Show(inUsePrompt, "Target In Use - UnBlock", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
+            if (dr != DialogResult.Yes) {
+                return;
+            }
+
+            foreach (var pi in currentScanResults) {
+                if (pi != null && pi.Pid != 4) {
+                    KillProcessSafely(pi.Pid, pi.Name);
+                }
+            }
+        } else {
+            var sbConfirm = new StringBuilder();
+            sbConfirm.AppendLine("This will permanently delete the following target(s):");
+            foreach (var p in targetPaths) {
+                sbConfirm.AppendLine("• " + p);
+            }
+            sbConfirm.AppendLine();
+            sbConfirm.AppendLine("Proceed with deletion?");
+
+            if (MessageBox.Show(sbConfirm.ToString(), "Delete Target(s)?", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) {
+                return;
             }
         }
 
         var report = new StringBuilder();
         bool anyFailedImmediate = false;
+        var deletedPaths = new List<string>();
 
-        foreach (string rawPath in targetPaths) {
+        foreach (string rawPath in new List<string>(targetPaths)) {
             string path = rawPath.Trim();
             if (string.IsNullOrEmpty(path)) continue;
 
@@ -598,6 +649,7 @@ public partial class UnlockerForm : Form {
             if (!exists) {
                 report.AppendLine("  -> File/Folder does not exist or was already deleted.");
                 report.AppendLine();
+                deletedPaths.Add(rawPath);
                 continue;
             }
 
@@ -616,57 +668,65 @@ public partial class UnlockerForm : Form {
                 }
             }
 
-            try {
-                bool success = false;
-                int win32Err = 0;
+            int win32Err;
+            string errorMsg;
+            bool success = AttemptDelete(path, out win32Err, out errorMsg);
 
-                if (Directory.Exists(path)) {
-                    success = RemoveDirectory(path);
-                    if (!success) {
-                        win32Err = Marshal.GetLastWin32Error();
-                        if (win32Err == 145) { // ERROR_DIR_NOT_EMPTY
-                            try {
-                                Directory.Delete(path, true);
-                                success = true;
-                            } catch (Exception exDir) {
-                                win32Err = Marshal.GetHRForException(exDir) & 0xFFFF;
+            // If deletion failed due to sharing violation, lock violation, or access denial (in use)
+            if (!success && (win32Err == 32 || win32Err == 33 || win32Err == 5)) {
+                string promptMsg = string.Format("'{0}' cannot be removed because an application is currently using it ({1}).\n\n" +
+                                                 "Do you want to terminate the locking process(es) first using UnBlock and retry deleting it?", 
+                                                 Path.GetFileName(path), GetSystemErrorMessage(win32Err));
+
+                if (MessageBox.Show(promptMsg, "File In Use - Kill & Delete?", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.Yes) {
+                    // Probe and terminate any processes holding locks on this path
+                    try {
+                        var specificScan = RunFastHandleScan(new HashSet<string>(new[] { path }, StringComparer.OrdinalIgnoreCase), true, delegate { });
+                        foreach (var pi in specificScan) {
+                            if (pi != null && pi.Pid != 4) {
+                                KillProcessSafely(pi.Pid, pi.Name);
                             }
                         }
-                    }
-                } else {
-                    success = DeleteFile(path);
-                    if (!success) {
-                        win32Err = Marshal.GetLastWin32Error();
-                    }
-                }
+                    } catch { }
 
-                if (success) {
-                    report.AppendLine("  [Success] File/Folder deleted successfully.");
-                } else {
-                    anyFailedImmediate = true;
-                    report.AppendLine("  [Failed] Immediate deletion failed.");
-                    report.AppendLine("  [System Error Code] " + win32Err + " - " + GetSystemErrorMessage(win32Err));
+                    try { File.SetAttributes(path, FileAttributes.Normal); } catch { }
+                    if (isAdmin) ResetFilePermissions(path);
 
-                    if (isAdmin) {
-                        bool rebootRegistered = MoveFileEx(path, null, MOVEFILE_DELAY_UNTIL_REBOOT);
-                        if (rebootRegistered) {
-                            report.AppendLine("  [Success] Scheduled for permanent deletion on next reboot.");
-                        } else {
-                            int rebootErr = Marshal.GetLastWin32Error();
-                            report.AppendLine("  [Failed] Could not schedule for reboot deletion (Error: " + rebootErr + ").");
-                        }
-                    } else {
-                        report.AppendLine("  [Error] Standard user privileges cannot schedule reboot deletion.");
-                    }
+                    success = AttemptDelete(path, out win32Err, out errorMsg);
                 }
-            } catch (Exception ex) {
+            }
+
+            if (success) {
+                report.AppendLine("  [Success] File/Folder deleted successfully.");
+                deletedPaths.Add(rawPath);
+            } else {
                 anyFailedImmediate = true;
-                int win32Err = Marshal.GetHRForException(ex) & 0xFFFF;
-                report.AppendLine("  [Failed] Immediate deletion failed with exception: " + ex.Message);
+                report.AppendLine("  [Failed] Immediate deletion failed.");
+                if (!string.IsNullOrEmpty(errorMsg)) {
+                    report.AppendLine("  [Details] " + errorMsg);
+                }
                 report.AppendLine("  [System Error Code] " + win32Err + " - " + GetSystemErrorMessage(win32Err));
+
+                if (isAdmin) {
+                    bool rebootRegistered = MoveFileEx(path, null, MOVEFILE_DELAY_UNTIL_REBOOT);
+                    if (rebootRegistered) {
+                        report.AppendLine("  [Success] Scheduled for permanent deletion on next reboot.");
+                        deletedPaths.Add(rawPath);
+                    } else {
+                        int rebootErr = Marshal.GetLastWin32Error();
+                        report.AppendLine("  [Failed] Could not schedule for reboot deletion (Error: " + rebootErr + ").");
+                    }
+                } else {
+                    report.AppendLine("  [Error] Standard user privileges cannot schedule reboot deletion.");
+                }
             }
             report.AppendLine();
         }
+
+        foreach (var dp in deletedPaths) {
+            targetPaths.Remove(dp);
+        }
+        UpdateTargetLabel();
 
         string title = anyFailedImmediate ? "Deletion Summary (Immediate Action Failed)" : "Deletion Successful";
         var icon = anyFailedImmediate ? MessageBoxIcon.Warning : MessageBoxIcon.Information;
@@ -767,6 +827,72 @@ public partial class UnlockerForm : Form {
         PromptForElevation();
     }
 
+    internal static bool KillProcessDirect(int pid, string name) {
+        if (pid == 4) return false;
+        try {
+            using (var p = Process.GetProcessById(pid)) {
+                p.Kill();
+                p.WaitForExit(2000);
+            }
+            return true;
+        } catch {
+            return false;
+        }
+    }
+
+    internal static void ResetFilePermissionsDirect(string path) {
+        try {
+            using (var p = new Process()) {
+                p.StartInfo.FileName = "takeown.exe";
+                p.StartInfo.Arguments = "/F \"" + path + "\" /A"; 
+                p.StartInfo.CreateNoWindow = true;
+                p.StartInfo.UseShellExecute = false;
+                p.Start();
+                p.WaitForExit(3000);
+            }
+
+            using (var p = new Process()) {
+                p.StartInfo.FileName = "icacls.exe";
+                p.StartInfo.Arguments = "\"" + path + "\" /grant *S-1-5-32-544:F *S-1-5-32-545:F /T /C"; 
+                p.StartInfo.CreateNoWindow = true;
+                p.StartInfo.UseShellExecute = false;
+                p.Start();
+                p.WaitForExit(3000);
+            }
+        } catch { }
+    }
+
+    internal static bool AttemptDeleteDirect(string path, out int win32Err, out string errorMsg) {
+        win32Err = 0;
+        errorMsg = null;
+        try {
+            if (Directory.Exists(path)) {
+                if (RemoveDirectory(path)) return true;
+                win32Err = Marshal.GetLastWin32Error();
+                try {
+                    foreach (string file in Directory.GetFiles(path, "*", SearchOption.AllDirectories)) {
+                        try { File.SetAttributes(file, FileAttributes.Normal); } catch { }
+                    }
+                    Directory.Delete(path, true);
+                    return true;
+                } catch (Exception exDir) {
+                    win32Err = Marshal.GetHRForException(exDir) & 0xFFFF;
+                    errorMsg = exDir.Message;
+                    return false;
+                }
+            } else if (File.Exists(path)) {
+                if (DeleteFile(path)) return true;
+                win32Err = Marshal.GetLastWin32Error();
+                return false;
+            }
+            return true;
+        } catch (Exception ex) {
+            win32Err = Marshal.GetHRForException(ex) & 0xFFFF;
+            errorMsg = ex.Message;
+            return false;
+        }
+    }
+
     private void PromptForElevation() {
         try {
             ProcessStartInfo psi = new ProcessStartInfo();
@@ -791,5 +917,26 @@ public partial class UnlockerForm : Form {
             ipcTimer.Dispose();
         }
         base.OnFormClosed(e);
+    }
+
+    internal static bool UnlockSafelyDirect(int pid, List<IntPtr> handles, string name) {
+        if (handles == null || handles.Count == 0) return true;
+        IntPtr hProcess = OpenProcess(PROCESS_DUP_HANDLE, false, pid);
+        if (hProcess == IntPtr.Zero) return false;
+
+        try {
+            bool allSuccess = true;
+            foreach (IntPtr handle in handles) {
+                IntPtr dupHandle;
+                if (DuplicateHandle(hProcess, handle, GetCurrentProcess(), out dupHandle, 0, false, DUPLICATE_CLOSE_SOURCE)) {
+                    CloseHandle(dupHandle);
+                } else {
+                    allSuccess = false;
+                }
+            }
+            return allSuccess;
+        } finally {
+            CloseHandle(hProcess);
+        }
     }
 }
