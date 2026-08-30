@@ -52,6 +52,7 @@ public partial class UnlockerForm {
             }
         }
     }
+
     private static bool MatchesDosPath(string candidatePath, TargetMatchInfo info) {
         if (info.IsDir) {
             return candidatePath.StartsWith(info.NormalizedPath, StringComparison.OrdinalIgnoreCase) ||
@@ -112,13 +113,12 @@ public partial class UnlockerForm {
         var modules = new List<string>();
         IntPtr hSnap = INVALID_HANDLE_VALUE;
         
-        // 1. Toolhelp Module Resolver
         for (int i = 0; i < 3; i++) {
             hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, (uint)pid);
             if (hSnap != INVALID_HANDLE_VALUE) break;
             
             int err = Marshal.GetLastWin32Error();
-            if (err != 0x1A8) // ERROR_BAD_LENGTH
+            if (err != 0x1A8)
                 break;
             
             Thread.Sleep(5);
@@ -143,11 +143,9 @@ public partial class UnlockerForm {
             if (modules.Count > 0) return modules;
         }
 
-        // Direct Address Space Walk + GetMappedFileName (only when the Toolhelp snapshot failed,
-        // e.g. protected processes; walking every region of every process is far too slow otherwise)
-        IntPtr hProcess = OpenProcess(0x1000, false, pid); // PROCESS_QUERY_LIMITED_INFORMATION
+        IntPtr hProcess = OpenProcess(0x1000, false, pid);
         if (hProcess == IntPtr.Zero) {
-            hProcess = OpenProcess(0x0400, false, pid); // Fallback to PROCESS_QUERY_INFORMATION
+            hProcess = OpenProcess(0x0400, false, pid);
         }
 
         if (hProcess != IntPtr.Zero) {
@@ -187,13 +185,18 @@ public partial class UnlockerForm {
         return modules;
     }
 
-    private List<ProcessItem> RunFastHandleScan(HashSet<string> targets, bool forceRefresh, Action<int> progressCallback) {
+    internal static List<ProcessItem> RunFastHandleScanDirect(HashSet<string> targets) {
+        InitFileTypeIndex();
+        return RunFastHandleScan(targets, true, null);
+    }
+
+    internal static List<ProcessItem> RunFastHandleScan(HashSet<string> targets, bool forceRefresh, Action<int> progressCallback) {
         var finalLockingProcesses = new Dictionary<int, ProcessItem>();
         var addedPids = new HashSet<int>();
 
-        progressCallback(5);
+        if (progressCallback != null) progressCallback(5);
         RefreshProcessSnapshot(forceRefresh);
-        progressCallback(10);
+        if (progressCallback != null) progressCallback(10);
 
         var targetList = new List<TargetMatchInfo>();
         foreach (string rawTarget in targets) {
@@ -247,7 +250,6 @@ public partial class UnlockerForm {
             }
         }
 
-        // Tier 1: Process Executable Paths
         lock (CacheLock) {
             foreach (KeyValuePair<int, string> kvp in ProcessPathMap) {
                 int pid = kvp.Key;
@@ -269,9 +271,8 @@ public partial class UnlockerForm {
                 }
             }
         }
-        progressCallback(20);
+        if (progressCallback != null) progressCallback(20);
 
-        // Tier 2: Process Loaded Modules (DLLs & Mapped Sections)
         List<int> activePids;
         lock (CacheLock) {
             activePids = new List<int>(ProcessNameMap.Keys);
@@ -315,9 +316,8 @@ public partial class UnlockerForm {
                 }
             }
         });
-        progressCallback(45);
+        if (progressCallback != null) progressCallback(45);
 
-        // Tier 3: System Handles Map
         bool anyTargetStrictlyLocked = false;
         foreach (KeyValuePair<string, bool> probe in pathLockCache) {
             if (probe.Value) {
@@ -327,8 +327,7 @@ public partial class UnlockerForm {
         }
 
         if (allTargetsAreFiles && !anyTargetStrictlyLocked) {
-            Log("Fast-skip: no target file is strictly locked; skipping system handle table scan.");
-            progressCallback(100);
+            if (progressCallback != null) progressCallback(100);
             return new List<ProcessItem>(finalLockingProcesses.Values);
         }
 
@@ -348,7 +347,7 @@ public partial class UnlockerForm {
             return new List<ProcessItem>(finalLockingProcesses.Values);
         }
 
-        progressCallback(55);
+        if (progressCallback != null) progressCallback(55);
 
         bool is64Bit = Marshal.SizeOf(typeof(IntPtr)) == 8;
         long handleCount = is64Bit ? Marshal.ReadInt64(buffer) : Marshal.ReadInt32(buffer);
@@ -382,7 +381,7 @@ public partial class UnlockerForm {
         }
 
         Marshal.FreeHGlobal(buffer);
-        progressCallback(65);
+        if (progressCallback != null) progressCallback(65);
 
         var scanQueue = new ConcurrentQueue<KeyValuePair<int, HandleInfo>>();
         foreach (KeyValuePair<int, List<HandleInfo>> kvp in handlesByPid) {
@@ -486,7 +485,9 @@ public partial class UnlockerForm {
                 while (!timeUp && scanQueue.TryDequeue(out pair)) {
                     try { processHandle(pair); } catch { }
                     int done = Interlocked.Increment(ref processed);
-                    if (done % 25 == 0) progressCallback(total > 0 ? 65 + (int)((done / (float)total) * 30) : 65);
+                    if (done % 25 == 0 && progressCallback != null) {
+                        progressCallback(total > 0 ? 65 + (int)((done / (float)total) * 30) : 65);
+                    }
                 }
             });
             worker.IsBackground = true;
@@ -501,7 +502,7 @@ public partial class UnlockerForm {
         }
         timeUp = true;
 
-        progressCallback(100);
+        if (progressCallback != null) progressCallback(100);
         return new List<ProcessItem>(finalLockingProcesses.Values);
     }
 
