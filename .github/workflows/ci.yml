@@ -15,7 +15,7 @@ jobs:
     name: build
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: compile application
         shell: pwsh
@@ -41,7 +41,7 @@ jobs:
           & "$PWD\artifacts\Unlocker.exe" "[WARMUP]"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: unblock-artifacts
           path: artifacts
@@ -52,7 +52,7 @@ jobs:
     needs: build
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: compile core library under test
         shell: pwsh
