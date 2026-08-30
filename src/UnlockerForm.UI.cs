@@ -65,7 +65,7 @@ public partial class UnlockerForm {
         headerButtons.Controls.Add(btnAddFolder);
 
         if (!isAdmin) {
-            btnElevate = MakeHeaderButton("\uD83D\uDEE1 Elevate", Color.FromArgb(241, 196, 15));
+            btnElevate = MakeHeaderButton("Elevate", Color.FromArgb(241, 196, 15));
             btnElevate.ForeColor = Color.Black;
             btnElevate.Click += BtnElevate_Click;
             toolTip.SetToolTip(btnElevate, "Restart UnBlock as Administrator to enable complete security adjustments.");
@@ -109,7 +109,7 @@ public partial class UnlockerForm {
         statusHost.Controls.Add(lblStatus);
 
         lblAdminState = new Label() {
-            Text = isAdmin ? "\uD83D\uDEE1 Administrator" : "\u26A0 Standard user",
+            Text = isAdmin ? "Administrator" : "Standard user",
             AutoSize = true,
             Font = new Font("Segoe UI", 8.5F, FontStyle.Bold),
             ForeColor = isAdmin ? Color.FromArgb(39, 174, 96) : Color.FromArgb(211, 84, 0),
