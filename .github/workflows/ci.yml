@@ -45,3 +45,38 @@ jobs:
           name: unblock-artifacts
           path: artifacts
           if-no-files-found: error
+
+  test:
+    name: test
+    needs: build
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: compile core library under test
+        shell: pwsh
+        run: |
+          $csc = Join-Path $env:WINDIR "Microsoft.NET\Framework64\v4.0.30319\csc.exe"
+          New-Item -ItemType Directory -Force -Path "artifacts\tests" | Out-Null
+          $src = Get-ChildItem -LiteralPath "src" -Filter "*.cs" | Where-Object { $_.Name -ne "Setup.cs" }
+          $refs = @("/r:System.dll", "/r:System.Core.dll", "/r:System.Drawing.dll", "/r:System.Windows.Forms.dll")
+          & $csc /nologo /target:library "/out:$PWD\artifacts\tests\UnBlock.Core.dll" $refs @($src.FullName)
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: compile setup sources under test
+        shell: pwsh
+        run: |
+          $csc = Join-Path $env:WINDIR "Microsoft.NET\Framework64\v4.0.30319\csc.exe"
+          $refs = @("/r:System.dll", "/r:System.Core.dll", "/r:System.Drawing.dll", "/r:System.Windows.Forms.dll")
+          & $csc /nologo /target:library "/out:$PWD\artifacts\tests\UnBlock.Setup.dll" $refs "src\Setup.cs"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: deep test harness
+        shell: pwsh
+        run: |
+          $csc = Join-Path $env:WINDIR "Microsoft.NET\Framework64\v4.0.30319\csc.exe"
+          $refs = @("/r:System.dll", "/r:System.Core.dll", "/r:System.Drawing.dll", "/r:System.Windows.Forms.dll", "/r:$PWD\artifacts\tests\UnBlock.Core.dll", "/r:$PWD\artifacts\tests\UnBlock.Setup.dll")
+          & $csc /nologo /target:exe "/out:$PWD\artifacts\tests\CiTests.exe" $refs "tests\CiTests.cs"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & "$PWD\artifacts\tests\CiTests.exe" --repo "$PWD"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
