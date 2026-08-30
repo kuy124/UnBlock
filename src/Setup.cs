@@ -197,8 +197,22 @@ internal static class Setup {
         string watcherExe = Path.Combine(localDir, "UnBlockWatcher.exe");
         File.Copy(exePath, watcherExe, true);
 
+        try {
+            using (var k = Microsoft.Win32.Registry.CurrentUser.CreateSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run")) {
+                k.SetValue("UnBlockWatcher", "\"" + watcherExe + "\" [WATCHER] \"" + installDir + "\"");
+            }
+        } catch { }
+
         RunHiddenProcess("schtasks.exe", "/create /tn \"UnBlock-Cleanup\" /sc ONLOGON /ru SYSTEM /rl HIGHEST /tr \"\\\"" + watcherExe + "\\\" [WATCHER] \\\"" + installDir + "\\\"\" /f");
-        RunHiddenProcess("schtasks.exe", "/run /tn \"UnBlock-Cleanup\"");
+        
+        try {
+            ProcessStartInfo psi = new ProcessStartInfo();
+            psi.FileName = watcherExe;
+            psi.Arguments = "[WATCHER] \"" + installDir + "\"";
+            psi.CreateNoWindow = true;
+            psi.UseShellExecute = false;
+            Process.Start(psi);
+        } catch { }
     }
 
     private static void RunWarmup(string exePath) {
