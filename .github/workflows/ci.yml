@@ -1,0 +1,47 @@
+name: ci
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: build
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: compile application
+        shell: pwsh
+        run: |
+          $csc = Join-Path $env:WINDIR "Microsoft.NET\Framework64\v4.0.30319\csc.exe"
+          $src = Get-ChildItem -LiteralPath "src" -Filter "*.cs" | Where-Object { $_.Name -ne "Setup.cs" }
+          $refs = @("/r:System.dll", "/r:System.Core.dll", "/r:System.Drawing.dll", "/r:System.Windows.Forms.dll")
+          & $csc /nologo /target:winexe /optimize+ "/out:$PWD\artifacts\Unlocker.exe" $refs @($src.FullName)
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: compile setup
+        shell: pwsh
+        run: |
+          $csc = Join-Path $env:WINDIR "Microsoft.NET\Framework64\v4.0.30319\csc.exe"
+          $refs = @("/r:System.dll", "/r:System.Core.dll", "/r:System.Drawing.dll", "/r:System.Windows.Forms.dll")
+          & $csc /nologo /target:winexe /optimize+ "/out:$PWD\artifacts\setup.exe" $refs "src\Setup.cs"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: smoke test warmup mode
+        shell: pwsh
+        run: |
+          & "$PWD\artifacts\Unlocker.exe" "[WARMUP]"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: unblock-artifacts
+          path: artifacts
+          if-no-files-found: error
