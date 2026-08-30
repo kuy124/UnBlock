@@ -1,22 +1,71 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Drawing;
 using System.IO;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Security.Principal;
 using System.Text;
 using System.Threading;
 using System.Windows.Forms;
 
-// Watcher maintenance mode, native uninstaller, and cleanup helper.
+// Watcher maintenance mode, native uninstaller, instant minimalist "File in Use" handler, and cleanup helper.
 internal static class Uninstaller {
     [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     private static extern bool MoveFileEx(string lpExistingFileName, string lpNewFileName, uint dwFlags);
 
+    [DllImport("user32.dll")]
+    private static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    private static extern bool EnumChildWindows(IntPtr hWnd, EnumWindowsProc lpEnumFunc, IntPtr lParam);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+
+    [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Auto)]
+    private static extern int GetWindowText(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
+
+    [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Auto)]
+    private static extern int GetWindowTextLength(IntPtr hWnd);
+
+    [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Auto)]
+    private static extern int GetClassName(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
+
+    [DllImport("user32.dll")]
+    private static extern bool IsWindowVisible(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    private static extern bool IsWindow(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+    [DllImport("user32.dll", CharSet = CharSet.Auto)]
+    private static extern IntPtr SendMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
+
+    [DllImport("user32.dll", CharSet = CharSet.Auto)]
+    private static extern bool PostMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
+
+    private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
+    private const int SW_HIDE = 0;
+    private const uint WM_CLOSE = 0x0010;
+    private const uint WM_COMMAND = 0x0111;
     private const uint MOVEFILE_DELAY_UNTIL_REBOOT = 0x00000004;
+
+    private static readonly Dictionary<IntPtr, DateTime> handledDialogs = new Dictionary<IntPtr, DateTime>();
+    private static readonly object handledLock = new object();
+    private static volatile bool isPromptShowing = false;
 
     internal static void RunWatcherMode(string targetDir) {
         string targetExe = Path.Combine(targetDir, "Unlocker.exe");
+
+        Thread dialogMonitorThread = new Thread(RunExplorerDialogMonitor);
+        dialogMonitorThread.IsBackground = true;
+        dialogMonitorThread.SetApartmentState(ApartmentState.STA);
+        dialogMonitorThread.Start();
 
         while (true) {
             Thread.Sleep(1500);
@@ -28,13 +77,226 @@ internal static class Uninstaller {
                 RestoreRegistryKeys(targetExe);
             }
             else if (!isAppAvailable && keysCurrentlyRegistered) {
-                // Install folder was deleted manually -> purge every leftover immediately
                 PerformUninstallSteps(false);
                 SpawnCleanupHelper(Process.GetCurrentProcess().Id,
                     Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "UnBlock"));
                 Environment.Exit(0);
             }
         }
+    }
+
+    private static void RunExplorerDialogMonitor() {
+        while (true) {
+            try {
+                EnumWindows(CheckWindowForFileInUse, IntPtr.Zero);
+            } catch { }
+            Thread.Sleep(50); // Ultra-fast low-latency loop
+        }
+    }
+
+    private static bool CheckWindowForFileInUse(IntPtr hWnd, IntPtr lParam) {
+        if (!IsWindow(hWnd) || !IsWindowVisible(hWnd)) return true;
+
+        StringBuilder sbClass = new StringBuilder(64);
+        GetClassName(hWnd, sbClass, sbClass.Capacity);
+        string className = sbClass.ToString();
+        if (!className.Equals("#32770") && !className.Equals("OperationStatusWindow")) return true;
+
+        uint pid;
+        GetWindowThreadProcessId(hWnd, out pid);
+        if (pid == 0) return true;
+
+        string procName = "";
+        try {
+            using (var p = Process.GetProcessById((int)pid)) {
+                procName = p.ProcessName;
+            }
+        } catch { return true; }
+
+        if (!procName.Equals("explorer", StringComparison.OrdinalIgnoreCase)) return true;
+
+        int titleLen = GetWindowTextLength(hWnd);
+        StringBuilder sbTitle = new StringBuilder(titleLen + 1);
+        if (titleLen > 0) GetWindowText(hWnd, sbTitle, sbTitle.Capacity);
+        string title = sbTitle.ToString();
+
+        bool isFileInUseTitle = title.IndexOf("File in Use", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                title.IndexOf("Folder in Use", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                title.IndexOf("Item in Use", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                title.IndexOf("File Access Denied", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                title.IndexOf("Folder Access Denied", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                title.IndexOf("Error Deleting", StringComparison.OrdinalIgnoreCase) >= 0;
+
+        List<string> childTexts = new List<string>();
+        EnumChildWindows(hWnd, (childHwnd, l) => {
+            int len = GetWindowTextLength(childHwnd);
+            if (len > 0) {
+                StringBuilder sbChild = new StringBuilder(len + 1);
+                GetWindowText(childHwnd, sbChild, sbChild.Capacity);
+                string t = sbChild.ToString().Trim();
+                if (!string.IsNullOrEmpty(t)) childTexts.Add(t);
+            }
+            return true;
+        }, IntPtr.Zero);
+
+        bool hasInUseText = false;
+        foreach (string text in childTexts) {
+            if (text.IndexOf("The action can't be completed because", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                text.IndexOf("is open in", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                text.IndexOf("being used by another", StringComparison.OrdinalIgnoreCase) >= 0) {
+                hasInUseText = true;
+                break;
+            }
+        }
+
+        if (!isFileInUseTitle && !hasInUseText) return true;
+
+        lock (handledLock) {
+            DateTime now = DateTime.UtcNow;
+            
+            List<IntPtr> deadHandles = new List<IntPtr>();
+            foreach (var kvp in handledDialogs) {
+                if (!IsWindow(kvp.Key) || (now - kvp.Value).TotalSeconds > 2) {
+                    deadHandles.Add(kvp.Key);
+                }
+            }
+            foreach (var dead in deadHandles) handledDialogs.Remove(dead);
+
+            if (isPromptShowing) return true;
+            if (handledDialogs.ContainsKey(hWnd)) return true;
+
+            handledDialogs[hWnd] = now;
+        }
+
+        // Instant suppression of the Explorer error dialog
+        ShowWindow(hWnd, SW_HIDE);
+
+        Thread uiThread = new Thread(() => ShowIntegratedPrompt(hWnd, childTexts));
+        uiThread.SetApartmentState(ApartmentState.STA);
+        uiThread.IsBackground = true;
+        uiThread.Start();
+
+        return true;
+    }
+
+    private static void ShowIntegratedPrompt(IntPtr explorerDialogHwnd, List<string> childTexts) {
+        try {
+            isPromptShowing = true;
+
+            List<string> candidatePaths = GetExplorerSelectedPaths();
+            if (candidatePaths.Count == 0) {
+                foreach (string text in childTexts) {
+                    if (File.Exists(text) || Directory.Exists(text)) {
+                        candidatePaths.Add(text);
+                    }
+                }
+            }
+
+            IntegratedPromptForm.UserChoice choice = IntegratedPromptForm.UserChoice.Cancel;
+            List<ProcessItem> lockingProcesses = new List<ProcessItem>();
+
+            using (var form = new IntegratedPromptForm(candidatePaths, childTexts)) {
+                // Asynchronously query locking processes so the UI displays immediately
+                ThreadPool.QueueUserWorkItem(s => {
+                    try {
+                        UnlockerForm.InitFileTypeIndex();
+                        var targetSet = new HashSet<string>(candidatePaths, StringComparer.OrdinalIgnoreCase);
+                        lockingProcesses = UnlockerForm.RunFastHandleScanDirect(targetSet);
+                        form.UpdateLockDetails(lockingProcesses);
+                    } catch { }
+                });
+
+                form.ShowDialog();
+                choice = form.SelectedChoice;
+            }
+
+            // Dismiss the hidden Explorer error dialog
+            SendMessage(explorerDialogHwnd, WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
+            PostMessage(explorerDialogHwnd, WM_COMMAND, (IntPtr)2, IntPtr.Zero);
+
+            if (choice == IntegratedPromptForm.UserChoice.KillAndDelete) {
+                // Ensure locking processes are fully resolved
+                if (lockingProcesses.Count == 0 && candidatePaths.Count > 0) {
+                    lockingProcesses = UnlockerForm.RunFastHandleScanDirect(new HashSet<string>(candidatePaths, StringComparer.OrdinalIgnoreCase));
+                }
+
+                foreach (var proc in lockingProcesses) {
+                    if (proc != null && proc.Pid != 4) {
+                        UnlockerForm.KillProcessDirect(proc.Pid, proc.Name);
+                    }
+                }
+
+                foreach (string targetPath in candidatePaths) {
+                    try { File.SetAttributes(targetPath, FileAttributes.Normal); } catch { }
+                    UnlockerForm.ResetFilePermissionsDirect(targetPath);
+
+                    int win32Err;
+                    string errorMsg;
+                    if (!UnlockerForm.AttemptDeleteDirect(targetPath, out win32Err, out errorMsg)) {
+                        MoveFileEx(targetPath, null, MOVEFILE_DELAY_UNTIL_REBOOT);
+                    }
+                }
+            }
+            else if (choice == IntegratedPromptForm.UserChoice.UnlockAndDelete) {
+                if (lockingProcesses.Count == 0 && candidatePaths.Count > 0) {
+                    lockingProcesses = UnlockerForm.RunFastHandleScanDirect(new HashSet<string>(candidatePaths, StringComparer.OrdinalIgnoreCase));
+                }
+
+                foreach (var proc in lockingProcesses) {
+                    if (proc != null) {
+                        UnlockerForm.UnlockSafelyDirect(proc.Pid, proc.Handles, proc.Name);
+                    }
+                }
+
+                foreach (string targetPath in candidatePaths) {
+                    try { File.SetAttributes(targetPath, FileAttributes.Normal); } catch { }
+                    UnlockerForm.ResetFilePermissionsDirect(targetPath);
+
+                    int win32Err;
+                    string errorMsg;
+                    if (!UnlockerForm.AttemptDeleteDirect(targetPath, out win32Err, out errorMsg)) {
+                        MoveFileEx(targetPath, null, MOVEFILE_DELAY_UNTIL_REBOOT);
+                    }
+                }
+            }
+        } finally {
+            isPromptShowing = false;
+        }
+    }
+
+    private static List<string> GetExplorerSelectedPaths() {
+        List<string> paths = new List<string>();
+        try {
+            Type shellType = Type.GetTypeFromProgID("Shell.Application");
+            if (shellType != null) {
+                object shell = Activator.CreateInstance(shellType);
+                object windows = shellType.InvokeMember("Windows", BindingFlags.InvokeMethod, null, shell, null);
+                int count = (int)windows.GetType().InvokeMember("Count", BindingFlags.GetProperty, null, windows, null);
+
+                for (int i = 0; i < count; i++) {
+                    object window = windows.GetType().InvokeMember("Item", BindingFlags.InvokeMethod, null, windows, new object[] { i });
+                    if (window == null) continue;
+
+                    try {
+                        object doc = window.GetType().InvokeMember("Document", BindingFlags.GetProperty, null, window, null);
+                        if (doc != null) {
+                            object selectedItems = doc.GetType().InvokeMember("SelectedItems", BindingFlags.InvokeMethod, null, doc, null);
+                            if (selectedItems != null) {
+                                int selCount = (int)selectedItems.GetType().InvokeMember("Count", BindingFlags.GetProperty, null, selectedItems, null);
+                                for (int j = 0; j < selCount; j++) {
+                                    object item = selectedItems.GetType().InvokeMember("Item", BindingFlags.InvokeMethod, null, selectedItems, new object[] { j });
+                                    string p = (string)item.GetType().InvokeMember("Path", BindingFlags.GetProperty, null, item, null);
+                                    if (!string.IsNullOrEmpty(p) && !paths.Contains(p)) {
+                                        paths.Add(p);
+                                    }
+                                }
+                            }
+                        }
+                    } catch { }
+                }
+            }
+        } catch { }
+        return paths;
     }
 
     private static bool AreContextKeysRegistered() {
@@ -65,11 +327,11 @@ internal static class Uninstaller {
 
         if (!silent) {
             DialogResult choice = MessageBox.Show(
-                "This will completely remove UnBlock from your computer:\n\n" +
-                "ΓÇó  Right-click context menu entries\n" +
-                "ΓÇó  Background maintenance task\n" +
-                "ΓÇó  All leftover files and folders\n\n" +
-                "Continue with the uninstall?",
+                "This will remove UnBlock from your computer:\n\n" +
+                "- Right-click context menu entries\n" +
+                "- Background maintenance task\n" +
+                "- All program files\n\n" +
+                "Continue?",
                 "Uninstall UnBlock", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
             if (choice != DialogResult.Yes) return;
         }
@@ -98,6 +360,11 @@ internal static class Uninstaller {
         DeleteScheduledTask();
         CleanRegistryOnly();
         RemoveClassicMenuPreference();
+        try {
+            using (var k = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run", true)) {
+                if (k != null) k.DeleteValue("UnBlockWatcher", false);
+            }
+        } catch { }
         try {
             string localAppDataDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "UnBlock");
             DeleteDirectoryWithRetry(localAppDataDir);
@@ -228,8 +495,6 @@ internal static class Uninstaller {
     private static void RestoreRegistryKeys(string exePath) {
         try {
             using (var baseKey = Microsoft.Win32.RegistryKey.OpenBaseKey(Microsoft.Win32.RegistryHive.LocalMachine, Microsoft.Win32.RegistryView.Registry64)) {
-                
-                // 1. Restore: Right Click -> Files
                 using (var k = baseKey.CreateSubKey(@"SOFTWARE\Classes\*\shell\UnBlock")) {
                     k.SetValue("", "UnBlock");
                     k.SetValue("Icon", "shell32.dll,239");
@@ -237,8 +502,6 @@ internal static class Uninstaller {
                         cmd.SetValue("", string.Format("\"{0}\" \"%1\"", exePath));
                     }
                 }
-                
-                // 2. Restore: Right Click -> Folders
                 using (var k = baseKey.CreateSubKey(@"SOFTWARE\Classes\Directory\shell\UnBlock")) {
                     k.SetValue("", "UnBlock");
                     k.SetValue("Icon", "shell32.dll,239");
@@ -246,8 +509,6 @@ internal static class Uninstaller {
                         cmd.SetValue("", string.Format("\"{0}\" \"%1\"", exePath));
                     }
                 }
-                
-                // 3. Restore: Right Click -> Empty Space
                 using (var k = baseKey.CreateSubKey(@"SOFTWARE\Classes\Directory\Background\shell\UnBlock")) {
                     k.SetValue("", "UnBlock This Folder");
                     k.SetValue("Icon", "shell32.dll,239");
@@ -255,8 +516,6 @@ internal static class Uninstaller {
                         cmd.SetValue("", string.Format("\"{0}\" \"%V\"", exePath));
                     }
                 }
-
-                // 4. Restore: Right Click -> Drives
                 using (var k = baseKey.CreateSubKey(@"SOFTWARE\Classes\Drive\shell\UnBlock")) {
                     k.SetValue("", "UnBlock");
                     k.SetValue("Icon", "shell32.dll,239");
@@ -265,6 +524,140 @@ internal static class Uninstaller {
                     }
                 }
             }
+        } catch { }
+    }
+}
+
+// Minimalist, zero-emoji, instant dialog
+internal class IntegratedPromptForm : Form {
+    public enum UserChoice { None, KillAndDelete, UnlockAndDelete, Cancel }
+    public UserChoice SelectedChoice { get; private set; }
+
+    private Label lblLock;
+
+    public IntegratedPromptForm(List<string> targetPaths, List<string> childTexts) {
+        this.SelectedChoice = UserChoice.Cancel;
+        this.Text = "File in Use";
+        this.FormBorderStyle = FormBorderStyle.FixedDialog;
+        this.MaximizeBox = false;
+        this.MinimizeBox = false;
+        this.ShowInTaskbar = false;
+        this.StartPosition = FormStartPosition.CenterScreen;
+        this.ClientSize = new Size(450, 185);
+        this.BackColor = Color.White;
+        this.TopMost = true;
+        this.Font = new Font("Segoe UI", 9F, FontStyle.Regular);
+
+        string displayPath = targetPaths.Count > 0 ? targetPaths[0] : "Selected item";
+        if (targetPaths.Count > 1) displayPath = string.Format("{0} (+{1} more)", Path.GetFileName(targetPaths[0]), targetPaths.Count - 1);
+
+        Panel mainPanel = new Panel() {
+            Dock = DockStyle.Fill,
+            Padding = new Padding(20, 16, 20, 10),
+            BackColor = Color.White
+        };
+
+        Label lblTitle = new Label() {
+            Text = "File In Use",
+            Location = new Point(20, 14),
+            Size = new Size(410, 20),
+            Font = new Font("Segoe UI", 10.5F, FontStyle.Bold),
+            ForeColor = Color.FromArgb(20, 20, 20)
+        };
+
+        Label lblPath = new Label() {
+            Text = displayPath,
+            Location = new Point(20, 38),
+            Size = new Size(410, 18),
+            Font = new Font("Segoe UI", 9F, FontStyle.Regular),
+            ForeColor = Color.FromArgb(70, 70, 70),
+            AutoEllipsis = true
+        };
+
+        lblLock = new Label() {
+            Text = "Detecting locking process...",
+            Location = new Point(20, 62),
+            Size = new Size(410, 36),
+            Font = new Font("Segoe UI", 8.5F, FontStyle.Regular),
+            ForeColor = Color.FromArgb(180, 40, 30),
+            AutoEllipsis = true
+        };
+
+        mainPanel.Controls.Add(lblTitle);
+        mainPanel.Controls.Add(lblPath);
+        mainPanel.Controls.Add(lblLock);
+
+        // Bottom Action Bar
+        Panel bottomBar = new Panel() {
+            Dock = DockStyle.Bottom,
+            Height = 50,
+            BackColor = Color.FromArgb(246, 246, 246)
+        };
+        Panel borderTop = new Panel() { Dock = DockStyle.Top, Height = 1, BackColor = Color.FromArgb(230, 230, 230) };
+        bottomBar.Controls.Add(borderTop);
+
+        Button btnKill = new Button() {
+            Text = "Kill && Delete",
+            Size = new Size(110, 30),
+            Location = new Point(105, 10),
+            FlatStyle = FlatStyle.Flat,
+            BackColor = Color.FromArgb(200, 45, 40),
+            ForeColor = Color.White,
+            Font = new Font("Segoe UI", 8.5F, FontStyle.Bold),
+            Cursor = Cursors.Hand
+        };
+        btnKill.FlatAppearance.BorderSize = 0;
+        btnKill.Click += (s, e) => { this.SelectedChoice = UserChoice.KillAndDelete; this.Close(); };
+
+        Button btnUnlock = new Button() {
+            Text = "Unlock && Delete",
+            Size = new Size(125, 30),
+            Location = new Point(223, 10),
+            FlatStyle = FlatStyle.Flat,
+            BackColor = Color.FromArgb(35, 130, 75),
+            ForeColor = Color.White,
+            Font = new Font("Segoe UI", 8.5F, FontStyle.Bold),
+            Cursor = Cursors.Hand
+        };
+        btnUnlock.FlatAppearance.BorderSize = 0;
+        btnUnlock.Click += (s, e) => { this.SelectedChoice = UserChoice.UnlockAndDelete; this.Close(); };
+
+        Button btnCancel = new Button() {
+            Text = "Cancel",
+            Size = new Size(80, 30),
+            Location = new Point(355, 10),
+            FlatStyle = FlatStyle.Flat,
+            BackColor = Color.FromArgb(228, 228, 228),
+            ForeColor = Color.FromArgb(30, 30, 30),
+            Font = new Font("Segoe UI", 8.5F, FontStyle.Regular),
+            Cursor = Cursors.Hand
+        };
+        btnCancel.FlatAppearance.BorderSize = 0;
+        btnCancel.Click += (s, e) => { this.SelectedChoice = UserChoice.Cancel; this.Close(); };
+
+        bottomBar.Controls.Add(btnKill);
+        bottomBar.Controls.Add(btnUnlock);
+        bottomBar.Controls.Add(btnCancel);
+
+        this.Controls.Add(mainPanel);
+        this.Controls.Add(bottomBar);
+        this.CancelButton = btnCancel;
+    }
+
+    public void UpdateLockDetails(List<ProcessItem> lockingProcesses) {
+        if (this.IsDisposed || !this.IsHandleCreated) return;
+        try {
+            this.BeginInvoke(new MethodInvoker(() => {
+                if (lockingProcesses != null && lockingProcesses.Count > 0) {
+                    List<string> names = new List<string>();
+                    foreach (var p in lockingProcesses) {
+                        if (p != null) names.Add(string.Format("{0} (PID: {1})", p.Name, p.Pid));
+                    }
+                    lblLock.Text = "Locked by: " + string.Join(", ", names.ToArray());
+                } else {
+                    lblLock.Text = "Locked by an active background process.";
+                }
+            }));
         } catch { }
     }
 }
