@@ -132,6 +132,49 @@ internal static class Setup {
         }
     }
 
+    private static bool IsSpecialSystemOrUserRootFolder(string dir) {
+        if (string.IsNullOrEmpty(dir)) return true;
+        try {
+            string full = Path.GetFullPath(dir).TrimEnd('\\', '/');
+            string root = Path.GetPathRoot(full).TrimEnd('\\', '/');
+            if (string.Equals(full, root, StringComparison.OrdinalIgnoreCase)) return true;
+
+            var specialFolders = new[] {
+                Environment.SpecialFolder.Desktop,
+                Environment.SpecialFolder.DesktopDirectory,
+                Environment.SpecialFolder.UserProfile,
+                Environment.SpecialFolder.Personal,
+                Environment.SpecialFolder.MyDocuments,
+                Environment.SpecialFolder.ProgramFiles,
+                Environment.SpecialFolder.ProgramFilesX86,
+                Environment.SpecialFolder.Windows,
+                Environment.SpecialFolder.System,
+                Environment.SpecialFolder.LocalApplicationData,
+                Environment.SpecialFolder.ApplicationData,
+                Environment.SpecialFolder.CommonApplicationData
+            };
+
+            foreach (var sf in specialFolders) {
+                try {
+                    string sfPath = Environment.GetFolderPath(sf);
+                    if (!string.IsNullOrEmpty(sfPath)) {
+                        string sfFull = Path.GetFullPath(sfPath).TrimEnd('\\', '/');
+                        if (string.Equals(full, sfFull, StringComparison.OrdinalIgnoreCase)) return true;
+                    }
+                } catch { }
+            }
+
+            string userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            if (!string.IsNullOrEmpty(userProfile)) {
+                string downloads = Path.Combine(userProfile, "Downloads").TrimEnd('\\', '/');
+                if (string.Equals(full, downloads, StringComparison.OrdinalIgnoreCase)) return true;
+            }
+        } catch {
+            return true;
+        }
+        return false;
+    }
+
     internal static string GetExistingInstallLocation() {
         try {
             foreach (string procName in new string[] { "Unlocker", "UnBlockWatcher" }) {
