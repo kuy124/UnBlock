@@ -120,6 +120,18 @@ internal static class Setup {
         }
     }
 
+    private static void PerformCleanup(string baseDir, string setupExe, string srcDir, string installedDir) {
+        bool canDeleteBaseDir = !string.IsNullOrEmpty(baseDir) &&
+                               !IsSpecialSystemOrUserRootFolder(baseDir) &&
+                               !string.Equals(baseDir, installedDir, StringComparison.OrdinalIgnoreCase);
+
+        if (canDeleteBaseDir) {
+            SpawnSelfCleanup(Process.GetCurrentProcess().Id, baseDir);
+        } else {
+            SpawnSelfCleanup(Process.GetCurrentProcess().Id, setupExe, srcDir);
+        }
+    }
+
     internal static string GetExistingInstallLocation() {
         try {
             foreach (string procName in new string[] { "Unlocker", "UnBlockWatcher" }) {
