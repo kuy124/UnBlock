@@ -10,7 +10,7 @@ using System.Text;
 using System.Threading;
 using System.Windows.Forms;
 
-// Watcher maintenance mode, native uninstaller, instant minimalist "File in Use" handler, and cleanup helper.
+// Watcher maintenance mode, native uninstaller UI, instant minimalist "File in Use" handler, and cleanup helper.
 internal static class Uninstaller {
     [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     private static extern bool MoveFileEx(string lpExistingFileName, string lpNewFileName, uint dwFlags);
@@ -47,6 +47,10 @@ internal static class Uninstaller {
 
     [DllImport("user32.dll", CharSet = CharSet.Auto)]
     private static extern bool PostMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool SetForegroundWindow(IntPtr hWnd);
 
     private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
 
@@ -90,7 +94,7 @@ internal static class Uninstaller {
             try {
                 EnumWindows(CheckWindowForFileInUse, IntPtr.Zero);
             } catch { }
-            Thread.Sleep(50); // Ultra-fast low-latency loop
+            Thread.Sleep(50);
         }
     }
 
@@ -153,22 +157,17 @@ internal static class Uninstaller {
 
         lock (handledLock) {
             DateTime now = DateTime.UtcNow;
-            
             List<IntPtr> deadHandles = new List<IntPtr>();
             foreach (var kvp in handledDialogs) {
-                if (!IsWindow(kvp.Key) || (now - kvp.Value).TotalSeconds > 2) {
-                    deadHandles.Add(kvp.Key);
-                }
+                if (!IsWindow(kvp.Key) || (now - kvp.Value).TotalSeconds > 2) deadHandles.Add(kvp.Key);
             }
             foreach (var dead in deadHandles) handledDialogs.Remove(dead);
 
             if (isPromptShowing) return true;
             if (handledDialogs.ContainsKey(hWnd)) return true;
-
             handledDialogs[hWnd] = now;
         }
 
-        // Instant suppression of the Explorer error dialog
         ShowWindow(hWnd, SW_HIDE);
 
         Thread uiThread = new Thread(() => ShowIntegratedPrompt(hWnd, childTexts));
@@ -182,13 +181,10 @@ internal static class Uninstaller {
     private static void ShowIntegratedPrompt(IntPtr explorerDialogHwnd, List<string> childTexts) {
         try {
             isPromptShowing = true;
-
             List<string> candidatePaths = GetExplorerSelectedPaths();
             if (candidatePaths.Count == 0) {
                 foreach (string text in childTexts) {
-                    if (File.Exists(text) || Directory.Exists(text)) {
-                        candidatePaths.Add(text);
-                    }
+                    if (File.Exists(text) || Directory.Exists(text)) candidatePaths.Add(text);
                 }
             }
 
@@ -196,7 +192,6 @@ internal static class Uninstaller {
             List<ProcessItem> lockingProcesses = new List<ProcessItem>();
 
             using (var form = new IntegratedPromptForm(candidatePaths, childTexts)) {
-                // Asynchronously query locking processes so the UI displays immediately
                 ThreadPool.QueueUserWorkItem(s => {
                     try {
                         UnlockerForm.InitFileTypeIndex();
@@ -210,20 +205,16 @@ internal static class Uninstaller {
                 choice = form.SelectedChoice;
             }
 
-            // Dismiss the hidden Explorer error dialog
             SendMessage(explorerDialogHwnd, WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
             PostMessage(explorerDialogHwnd, WM_COMMAND, (IntPtr)2, IntPtr.Zero);
 
             if (choice == IntegratedPromptForm.UserChoice.KillAndDelete) {
-                // Ensure locking processes are fully resolved
                 if (lockingProcesses.Count == 0 && candidatePaths.Count > 0) {
                     lockingProcesses = UnlockerForm.RunFastHandleScanDirect(new HashSet<string>(candidatePaths, StringComparer.OrdinalIgnoreCase));
                 }
 
                 foreach (var proc in lockingProcesses) {
-                    if (proc != null && proc.Pid != 4) {
-                        UnlockerForm.KillProcessDirect(proc.Pid, proc.Name);
-                    }
+                    if (proc != null && proc.Pid != 4) UnlockerForm.KillProcessDirect(proc.Pid, proc.Name);
                 }
 
                 foreach (string targetPath in candidatePaths) {
@@ -243,9 +234,7 @@ internal static class Uninstaller {
                 }
 
                 foreach (var proc in lockingProcesses) {
-                    if (proc != null) {
-                        UnlockerForm.UnlockSafelyDirect(proc.Pid, proc.Handles, proc.Name);
-                    }
+                    if (proc != null) UnlockerForm.UnlockSafelyDirect(proc.Pid, proc.Handles, proc.Name);
                 }
 
                 foreach (string targetPath in candidatePaths) {
@@ -286,9 +275,7 @@ internal static class Uninstaller {
                                 for (int j = 0; j < selCount; j++) {
                                     object item = selectedItems.GetType().InvokeMember("Item", BindingFlags.InvokeMethod, null, selectedItems, new object[] { j });
                                     string p = (string)item.GetType().InvokeMember("Path", BindingFlags.GetProperty, null, item, null);
-                                    if (!string.IsNullOrEmpty(p) && !paths.Contains(p)) {
-                                        paths.Add(p);
-                                    }
+                                    if (!string.IsNullOrEmpty(p) && !paths.Contains(p)) paths.Add(p);
                                 }
                             }
                         }
@@ -306,9 +293,7 @@ internal static class Uninstaller {
                     return k != null;
                 }
             }
-        } catch {
-            return true;
-        }
+        } catch { return true; }
     }
 
     internal static void RunInteractiveUninstall(bool silent) {
@@ -325,27 +310,18 @@ internal static class Uninstaller {
             } catch { }
         }
 
-        if (!silent) {
-            DialogResult choice = MessageBox.Show(
-                "This will remove UnBlock from your computer:\n\n" +
-                "- Right-click context menu entries\n" +
-                "- Background maintenance task\n" +
-                "- All program files\n\n" +
-                "Continue?",
-                "Uninstall UnBlock", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
-            if (choice != DialogResult.Yes) return;
-        }
-
-        PerformUninstallSteps(true);
-
         string installDir = "";
         try { installDir = Path.GetDirectoryName(Application.ExecutablePath); } catch { }
         string localAppDataDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "UnBlock");
-        SpawnCleanupHelper(Process.GetCurrentProcess().Id, installDir, localAppDataDir);
 
-        if (!silent) {
-            MessageBox.Show("UnBlock has been completely uninstalled.", "Uninstall Complete",
-                MessageBoxButtons.OK, MessageBoxIcon.Information);
+        if (silent) {
+            PerformUninstallSteps(true);
+            SpawnCleanupHelper(Process.GetCurrentProcess().Id, installDir, localAppDataDir);
+            return;
+        }
+
+        using (UninstallWizardForm wizard = new UninstallWizardForm(installDir, localAppDataDir)) {
+            Application.Run(wizard);
         }
     }
 
@@ -355,7 +331,7 @@ internal static class Uninstaller {
         return principal.IsInRole(WindowsBuiltInRole.Administrator);
     }
 
-    private static void PerformUninstallSteps(bool killInstances) {
+    internal static void PerformUninstallSteps(bool killInstances) {
         if (killInstances) KillRunningInstances();
         DeleteScheduledTask();
         CleanRegistryOnly();
@@ -391,9 +367,7 @@ internal static class Uninstaller {
                     p.Kill();
                     p.WaitForExit(3000);
                 } catch { }
-                finally {
-                    try { p.Dispose(); } catch { }
-                }
+                finally { try { p.Dispose(); } catch { } }
             }
         }
     }
@@ -429,7 +403,7 @@ internal static class Uninstaller {
         }
     }
 
-    private static void SpawnCleanupHelper(int pidToWait, params string[] directories) {
+    internal static void SpawnCleanupHelper(int pidToWait, params string[] directories) {
         try {
             string self = Application.ExecutablePath;
             string helperPath = Path.Combine(Path.GetTempPath(), "UnBlockCleanup-" + Guid.NewGuid().ToString("N").Substring(0, 10) + ".tmp");
@@ -451,12 +425,9 @@ internal static class Uninstaller {
     internal static void RunCleanupHelper(string[] args) {
         try {
             try { Environment.CurrentDirectory = Environment.GetFolderPath(Environment.SpecialFolder.System); } catch { }
-
             int pidToWait = int.Parse(args[1]);
             try {
-                using (Process p = Process.GetProcessById(pidToWait)) {
-                    p.WaitForExit(20000);
-                }
+                using (Process p = Process.GetProcessById(pidToWait)) { p.WaitForExit(20000); }
             } catch { }
 
             DeleteScheduledTask();
@@ -465,7 +436,6 @@ internal static class Uninstaller {
             for (int i = 2; i < args.Length; i++) {
                 DeleteDirectoryWithRetry(args[i]);
             }
-
             SelfDestruct();
         } catch { }
         Environment.Exit(0);
@@ -498,33 +468,259 @@ internal static class Uninstaller {
                 using (var k = baseKey.CreateSubKey(@"SOFTWARE\Classes\*\shell\UnBlock")) {
                     k.SetValue("", "UnBlock");
                     k.SetValue("Icon", "shell32.dll,239");
-                    using (var cmd = k.CreateSubKey("command")) {
-                        cmd.SetValue("", string.Format("\"{0}\" \"%1\"", exePath));
-                    }
+                    using (var cmd = k.CreateSubKey("command")) { cmd.SetValue("", string.Format("\"{0}\" \"%1\"", exePath)); }
                 }
                 using (var k = baseKey.CreateSubKey(@"SOFTWARE\Classes\Directory\shell\UnBlock")) {
                     k.SetValue("", "UnBlock");
                     k.SetValue("Icon", "shell32.dll,239");
-                    using (var cmd = k.CreateSubKey("command")) {
-                        cmd.SetValue("", string.Format("\"{0}\" \"%1\"", exePath));
-                    }
+                    using (var cmd = k.CreateSubKey("command")) { cmd.SetValue("", string.Format("\"{0}\" \"%1\"", exePath)); }
                 }
                 using (var k = baseKey.CreateSubKey(@"SOFTWARE\Classes\Directory\Background\shell\UnBlock")) {
                     k.SetValue("", "UnBlock This Folder");
                     k.SetValue("Icon", "shell32.dll,239");
-                    using (var cmd = k.CreateSubKey("command")) {
-                        cmd.SetValue("", string.Format("\"{0}\" \"%V\"", exePath));
-                    }
+                    using (var cmd = k.CreateSubKey("command")) { cmd.SetValue("", string.Format("\"{0}\" \"%V\"", exePath)); }
                 }
                 using (var k = baseKey.CreateSubKey(@"SOFTWARE\Classes\Drive\shell\UnBlock")) {
                     k.SetValue("", "UnBlock");
                     k.SetValue("Icon", "shell32.dll,239");
-                    using (var cmd = k.CreateSubKey("command")) {
-                        cmd.SetValue("", string.Format("\"{0}\" \"%1\"", exePath));
-                    }
+                    using (var cmd = k.CreateSubKey("command")) { cmd.SetValue("", string.Format("\"{0}\" \"%1\"", exePath)); }
                 }
             }
         } catch { }
+    }
+}
+
+// Modern Fluent Uninstaller Form
+internal class UninstallWizardForm : Form {
+    private readonly string installDir;
+    private readonly string localAppDataDir;
+    private Button btnUninstall;
+    private Button btnFinish;
+    private ProgressBar progressBar;
+    private Label lblStatus;
+    private Panel contentPanel;
+
+    public UninstallWizardForm(string installDir, string localAppDataDir) {
+        this.installDir = installDir;
+        this.localAppDataDir = localAppDataDir;
+
+        this.Text = "Uninstall UnBlock";
+        this.Size = new Size(500, 350);
+        this.StartPosition = FormStartPosition.CenterScreen;
+        this.FormBorderStyle = FormBorderStyle.FixedDialog;
+        this.MaximizeBox = false;
+        this.MinimizeBox = false;
+        this.TopMost = true;
+        this.BackColor = Color.FromArgb(248, 249, 250);
+        this.Font = new Font("Segoe UI", 9F, FontStyle.Regular);
+
+        BuildUI();
+    }
+
+    protected override void OnShown(EventArgs e) {
+        base.OnShown(e);
+        this.Activate();
+        this.BringToFront();
+        Uninstaller.SetForegroundWindow(this.Handle);
+    }
+
+    private void BuildUI() {
+        Panel headerPanel = new Panel() {
+            Dock = DockStyle.Top,
+            Height = 68,
+            BackColor = Color.FromArgb(44, 53, 64)
+        };
+
+        Label lblTitle = new Label() {
+            Text = "Uninstall UnBlock",
+            Location = new Point(20, 12),
+            Size = new Size(300, 22),
+            Font = new Font("Segoe UI", 12F, FontStyle.Bold),
+            ForeColor = Color.White
+        };
+
+        Label lblSubtitle = new Label() {
+            Text = "Remove UnBlock File & Folder Unlocker and context menus from this system.",
+            Location = new Point(21, 37),
+            Size = new Size(450, 18),
+            Font = new Font("Segoe UI", 8.5F),
+            ForeColor = Color.FromArgb(180, 192, 204)
+        };
+
+        headerPanel.Controls.Add(lblTitle);
+        headerPanel.Controls.Add(lblSubtitle);
+
+        Panel bottomBar = new Panel() {
+            Dock = DockStyle.Bottom,
+            Height = 54,
+            BackColor = Color.FromArgb(241, 243, 245)
+        };
+        Panel topBorder = new Panel() { Dock = DockStyle.Top, Height = 1, BackColor = Color.FromArgb(222, 226, 230) };
+        bottomBar.Controls.Add(topBorder);
+
+        btnUninstall = new Button() {
+            Text = "Uninstall Now",
+            Size = new Size(115, 32),
+            Location = new Point(265, 11),
+            FlatStyle = FlatStyle.Flat,
+            BackColor = Color.FromArgb(192, 57, 43),
+            ForeColor = Color.White,
+            Font = new Font("Segoe UI", 9F, FontStyle.Bold),
+            Cursor = Cursors.Hand
+        };
+        btnUninstall.FlatAppearance.BorderSize = 0;
+        btnUninstall.Click += BtnUninstall_Click;
+
+        btnFinish = new Button() {
+            Text = "Cancel",
+            Size = new Size(85, 32),
+            Location = new Point(390, 11),
+            FlatStyle = FlatStyle.Flat,
+            BackColor = Color.FromArgb(225, 229, 233),
+            ForeColor = Color.FromArgb(40, 40, 40),
+            Font = new Font("Segoe UI", 9F),
+            Cursor = Cursors.Hand
+        };
+        btnFinish.FlatAppearance.BorderSize = 0;
+        btnFinish.Click += (s, e) => this.Close();
+
+        bottomBar.Controls.Add(btnUninstall);
+        bottomBar.Controls.Add(btnFinish);
+
+        contentPanel = new Panel() {
+            Dock = DockStyle.Fill,
+            Padding = new Padding(24, 18, 24, 10),
+            BackColor = Color.FromArgb(248, 249, 250)
+        };
+
+        Label lblPrompt = new Label() {
+            Text = "The following components will be removed from your PC:",
+            Location = new Point(24, 16),
+            Size = new Size(440, 20),
+            Font = new Font("Segoe UI", 9.5F, FontStyle.Bold),
+            ForeColor = Color.FromArgb(40, 45, 50)
+        };
+
+        Label lblItems = new Label() {
+            Text = "• Explorer Right-Click Context Menu Verbs\n" +
+                   "• Background Maintenance & Self-Cleaning Watcher Task\n" +
+                   "• Installed Executables & Registry Registrations",
+            Location = new Point(32, 42),
+            Size = new Size(430, 60),
+            Font = new Font("Segoe UI", 8.8F),
+            ForeColor = Color.FromArgb(70, 75, 80)
+        };
+
+        progressBar = new ProgressBar() {
+            Location = new Point(24, 115),
+            Size = new Size(436, 8),
+            Style = ProgressBarStyle.Continuous,
+            Visible = false
+        };
+
+        lblStatus = new Label() {
+            Text = "",
+            Location = new Point(24, 128),
+            Size = new Size(436, 20),
+            Font = new Font("Segoe UI", 8.5F, FontStyle.Italic),
+            ForeColor = Color.FromArgb(100, 105, 110),
+            Visible = false
+        };
+
+        contentPanel.Controls.Add(lblPrompt);
+        contentPanel.Controls.Add(lblItems);
+        contentPanel.Controls.Add(progressBar);
+        contentPanel.Controls.Add(lblStatus);
+
+        this.Controls.Add(contentPanel);
+        this.Controls.Add(bottomBar);
+        this.Controls.Add(headerPanel);
+        this.AcceptButton = btnUninstall;
+        this.CancelButton = btnFinish;
+    }
+
+    private void BtnUninstall_Click(object sender, EventArgs e) {
+        btnUninstall.Enabled = false;
+        progressBar.Visible = true;
+        progressBar.Value = 25;
+        lblStatus.Visible = true;
+        lblStatus.Text = "Removing context menu registrations...";
+
+        ThreadPool.QueueUserWorkItem(s => {
+            try {
+                Uninstaller.PerformUninstallSteps(true);
+
+                if (this.IsHandleCreated && !this.IsDisposed) {
+                    this.BeginInvoke(new MethodInvoker(() => {
+                        progressBar.Value = 80;
+                        lblStatus.Text = "Scheduling final directory cleanup...";
+                    }));
+                }
+
+                Uninstaller.SpawnCleanupHelper(Process.GetCurrentProcess().Id, installDir, localAppDataDir);
+
+                if (this.IsHandleCreated && !this.IsDisposed) {
+                    this.BeginInvoke(new MethodInvoker(() => {
+                        ShowCompletionView();
+                    }));
+                }
+            } catch (Exception ex) {
+                if (this.IsHandleCreated && !this.IsDisposed) {
+                    this.BeginInvoke(new MethodInvoker(() => {
+                        progressBar.Visible = false;
+                        lblStatus.ForeColor = Color.FromArgb(192, 57, 43);
+                        lblStatus.Text = "Uninstall encountered an error: " + ex.Message;
+                        btnUninstall.Enabled = true;
+                    }));
+                }
+            }
+        });
+    }
+
+    private void ShowCompletionView() {
+        contentPanel.Controls.Clear();
+
+        Panel successCard = new Panel() {
+            Location = new Point(24, 16),
+            Size = new Size(436, 140),
+            BackColor = Color.White
+        };
+        successCard.Paint += (s, pe) => {
+            using (Pen p = new Pen(Color.FromArgb(220, 226, 230), 1)) {
+                pe.Graphics.DrawRectangle(p, 0, 0, successCard.Width - 1, successCard.Height - 1);
+            }
+        };
+
+        Label lblSuccessTitle = new Label() {
+            Text = "Uninstallation Complete",
+            Location = new Point(18, 16),
+            Size = new Size(400, 24),
+            Font = new Font("Segoe UI", 12F, FontStyle.Bold),
+            ForeColor = Color.FromArgb(39, 174, 96)
+        };
+
+        Label lblSuccessDetails = new Label() {
+            Text = "UnBlock has been completely removed from your computer.\n\n" +
+                   "All context menu entries and background maintenance tasks have been deleted.",
+            Location = new Point(20, 48),
+            Size = new Size(396, 75),
+            Font = new Font("Segoe UI", 9F),
+            ForeColor = Color.FromArgb(50, 55, 60)
+        };
+
+        successCard.Controls.Add(lblSuccessTitle);
+        successCard.Controls.Add(lblSuccessDetails);
+        contentPanel.Controls.Add(successCard);
+
+        btnUninstall.Visible = false;
+        btnFinish.Text = "Close";
+        btnFinish.Size = new Size(95, 32);
+        btnFinish.Location = new Point(380, 11);
+        btnFinish.BackColor = Color.FromArgb(39, 174, 96);
+        btnFinish.ForeColor = Color.White;
+        btnFinish.Font = new Font("Segoe UI", 9F, FontStyle.Bold);
+        btnFinish.Focus();
+        this.AcceptButton = btnFinish;
     }
 }
 
@@ -587,7 +783,6 @@ internal class IntegratedPromptForm : Form {
         mainPanel.Controls.Add(lblPath);
         mainPanel.Controls.Add(lblLock);
 
-        // Bottom Action Bar
         Panel bottomBar = new Panel() {
             Dock = DockStyle.Bottom,
             Height = 50,
