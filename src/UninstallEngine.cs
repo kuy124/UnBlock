@@ -962,12 +962,22 @@ internal class IntegratedPromptForm : Form {
             this.BeginInvoke(new MethodInvoker(() => {
                 if (lockingProcesses != null && lockingProcesses.Count > 0) {
                     List<string> names = new List<string>();
+                    string firstProcPath = null;
                     foreach (var p in lockingProcesses) {
-                        if (p != null) names.Add(string.Format("{0} (PID: {1})", p.Name, p.Pid));
+                        if (p != null) {
+                            names.Add(string.Format("{0} (PID: {1})", p.Name, p.Pid));
+                            if (string.IsNullOrEmpty(firstProcPath) && File.Exists(p.Path)) firstProcPath = p.Path;
+                        }
                     }
-                    lblLock.Text = "Locked by: " + string.Join(", ", names.ToArray());
+                    lblLockProcess.Text = "Locked by:\n" + string.Join(", ", names.ToArray());
+
+                    if (!string.IsNullOrEmpty(firstProcPath)) {
+                        try {
+                            picProcessIcon.Image = Icon.ExtractAssociatedIcon(firstProcPath).ToBitmap();
+                        } catch { }
+                    }
                 } else {
-                    lblLock.Text = "Locked by an active background process.";
+                    lblLockProcess.Text = "Exclusive lock detected by an active background system process.";
                 }
             }));
         } catch { }
