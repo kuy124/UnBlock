@@ -538,13 +538,14 @@ internal static class Setup {
     }
 
     private static void DeleteFileWithRetry(string path) {
-        for (int i = 0; i < 6; i++) {
+        if (string.IsNullOrEmpty(path) || !File.Exists(path)) return;
+        for (int i = 0; i < 10; i++) {
             try {
                 File.SetAttributes(path, FileAttributes.Normal);
                 File.Delete(path);
                 if (!File.Exists(path)) return;
             } catch { }
-            Thread.Sleep(400);
+            Thread.Sleep(500);
         }
     }
 
