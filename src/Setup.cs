@@ -522,7 +522,9 @@ internal static class Setup {
     }
 
     private static void DeleteDirectoryWithRetry(string path) {
-        for (int i = 0; i < 6; i++) {
+        if (string.IsNullOrEmpty(path) || !Directory.Exists(path)) return;
+        NavigateExplorerToParent(path);
+        for (int i = 0; i < 10; i++) {
             try {
                 if (!Directory.Exists(path)) return;
                 foreach (string file in Directory.GetFiles(path, "*", SearchOption.AllDirectories)) {
@@ -531,7 +533,7 @@ internal static class Setup {
                 Directory.Delete(path, true);
                 if (!Directory.Exists(path)) return;
             } catch { }
-            Thread.Sleep(400);
+            Thread.Sleep(500);
         }
     }
 
