@@ -12,7 +12,7 @@ using System.Threading;
 using System.Windows.Forms;
 
 // Modern graphical installer: compiles application sources locally,
-// registers context verbs and scheduled tasks, then cleans up temporary setup files.
+// registers context verbs and scheduled tasks, then cleans up the extracted setup folder.
 internal static class Setup {
     [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     private static extern bool MoveFileEx(string lpExistingFileName, string lpNewFileName, uint dwFlags);
