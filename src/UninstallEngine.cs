@@ -888,35 +888,36 @@ internal class IntegratedPromptForm : Form {
         lockCard.Controls.Add(lblLockHeader);
         lockCard.Controls.Add(lblLockProcess);
 
+        // --- Action Buttons Bar ---
         Panel bottomBar = new Panel() {
             Dock = DockStyle.Bottom,
-            Height = 50,
-            BackColor = Color.FromArgb(246, 246, 246)
+            Height = 52,
+            BackColor = Color.FromArgb(242, 244, 248)
         };
-        Panel borderTop = new Panel() { Dock = DockStyle.Top, Height = 1, BackColor = Color.FromArgb(230, 230, 230) };
+        Panel borderTop = new Panel() { Dock = DockStyle.Top, Height = 1, BackColor = Color.FromArgb(226, 230, 236) };
         bottomBar.Controls.Add(borderTop);
 
-        Button btnKill = new Button() {
+        btnKill = new Button() {
             Text = "Kill && Delete",
-            Size = new Size(110, 30),
-            Location = new Point(105, 10),
+            Size = new Size(125, 32),
+            Location = new Point(150, 10),
             FlatStyle = FlatStyle.Flat,
-            BackColor = Color.FromArgb(200, 45, 40),
+            BackColor = Color.FromArgb(215, 45, 35),
             ForeColor = Color.White,
-            Font = new Font("Segoe UI", 8.5F, FontStyle.Bold),
+            Font = new Font("Segoe UI", 8.8F, FontStyle.Bold),
             Cursor = Cursors.Hand
         };
         btnKill.FlatAppearance.BorderSize = 0;
         btnKill.Click += (s, e) => { this.SelectedChoice = UserChoice.KillAndDelete; this.Close(); };
 
-        Button btnUnlock = new Button() {
+        btnUnlock = new Button() {
             Text = "Unlock && Delete",
-            Size = new Size(125, 30),
-            Location = new Point(223, 10),
+            Size = new Size(135, 32),
+            Location = new Point(283, 10),
             FlatStyle = FlatStyle.Flat,
-            BackColor = Color.FromArgb(35, 130, 75),
+            BackColor = Color.FromArgb(32, 140, 75),
             ForeColor = Color.White,
-            Font = new Font("Segoe UI", 8.5F, FontStyle.Bold),
+            Font = new Font("Segoe UI", 8.8F, FontStyle.Bold),
             Cursor = Cursors.Hand
         };
         btnUnlock.FlatAppearance.BorderSize = 0;
@@ -924,12 +925,12 @@ internal class IntegratedPromptForm : Form {
 
         Button btnCancel = new Button() {
             Text = "Cancel",
-            Size = new Size(80, 30),
-            Location = new Point(355, 10),
+            Size = new Size(80, 32),
+            Location = new Point(424, 10),
             FlatStyle = FlatStyle.Flat,
-            BackColor = Color.FromArgb(228, 228, 228),
-            ForeColor = Color.FromArgb(30, 30, 30),
-            Font = new Font("Segoe UI", 8.5F, FontStyle.Regular),
+            BackColor = Color.FromArgb(226, 230, 236),
+            ForeColor = Color.FromArgb(40, 45, 50),
+            Font = new Font("Segoe UI", 8.8F, FontStyle.Regular),
             Cursor = Cursors.Hand
         };
         btnCancel.FlatAppearance.BorderSize = 0;
@@ -939,9 +940,13 @@ internal class IntegratedPromptForm : Form {
         bottomBar.Controls.Add(btnUnlock);
         bottomBar.Controls.Add(btnCancel);
 
-        this.Controls.Add(mainPanel);
+        this.Controls.Add(picTargetIcon);
+        this.Controls.Add(lblTargetName);
+        this.Controls.Add(lblTargetDir);
+        this.Controls.Add(lockCard);
         this.Controls.Add(bottomBar);
         this.CancelButton = btnCancel;
+        this.AcceptButton = btnKill;
     }
 
     public void UpdateLockDetails(List<ProcessItem> lockingProcesses) {
