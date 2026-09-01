@@ -448,6 +448,7 @@ internal static class Setup {
 // Modern Fluent Setup Wizard Form
 internal class SetupWizardForm : Form {
     public bool InstallSucceeded { get; private set; }
+    public string InstalledDirectory { get; private set; }
 
     private readonly List<string> sources;
     private readonly string existingDir;
@@ -470,6 +471,7 @@ internal class SetupWizardForm : Form {
         this.existingDir = existingDir;
         this.isDevMode = isDevMode;
         this.InstallSucceeded = false;
+        this.InstalledDirectory = "";
 
         this.Text = "UnBlock Setup";
         this.Size = new Size(540, 430);
