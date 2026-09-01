@@ -787,64 +787,106 @@ internal class UninstallWizardForm : Form {
     }
 }
 
-// Minimalist, zero-emoji, instant dialog
+// Modern, ultra-fast Fluent File-in-Use Modal Dialog
 internal class IntegratedPromptForm : Form {
     public enum UserChoice { None, KillAndDelete, UnlockAndDelete, Cancel }
     public UserChoice SelectedChoice { get; private set; }
 
-    private Label lblLock;
+    private Label lblLockProcess;
+    private PictureBox picTargetIcon;
+    private PictureBox picProcessIcon;
+    private Panel lockCard;
+    private Button btnKill;
+    private Button btnUnlock;
 
-    public IntegratedPromptForm(List<string> targetPaths, List<string> childTexts) {
+    public IntegratedPromptForm(List<string> targetPaths) {
         this.SelectedChoice = UserChoice.Cancel;
-        this.Text = "File in Use";
+        this.Text = "File in Use — UnBlock";
         this.FormBorderStyle = FormBorderStyle.FixedDialog;
         this.MaximizeBox = false;
         this.MinimizeBox = false;
         this.ShowInTaskbar = false;
         this.StartPosition = FormStartPosition.CenterScreen;
-        this.ClientSize = new Size(450, 185);
-        this.BackColor = Color.White;
+        this.ClientSize = new Size(510, 215);
+        this.BackColor = Color.FromArgb(249, 250, 252);
         this.TopMost = true;
         this.Font = new Font("Segoe UI", 9F, FontStyle.Regular);
 
-        string displayPath = targetPaths.Count > 0 ? targetPaths[0] : "Selected item";
-        if (targetPaths.Count > 1) displayPath = string.Format("{0} (+{1} more)", Path.GetFileName(targetPaths[0]), targetPaths.Count - 1);
+        string primaryPath = targetPaths.Count > 0 ? targetPaths[0] : "Target item";
+        string fileName = Path.GetFileName(primaryPath);
+        if (string.IsNullOrEmpty(fileName)) fileName = primaryPath;
+        if (targetPaths.Count > 1) fileName = string.Format("{0} (+{1} more)", fileName, targetPaths.Count - 1);
 
-        Panel mainPanel = new Panel() {
-            Dock = DockStyle.Fill,
-            Padding = new Padding(20, 16, 20, 10),
+        // --- File Target Section ---
+        picTargetIcon = new PictureBox() {
+            Location = new Point(20, 16),
+            Size = new Size(32, 32),
+            SizeMode = PictureBoxSizeMode.CenterImage
+        };
+        try {
+            if (File.Exists(primaryPath)) picTargetIcon.Image = Icon.ExtractAssociatedIcon(primaryPath).ToBitmap();
+            else picTargetIcon.Image = SystemIcons.Warning.ToBitmap();
+        } catch {
+            picTargetIcon.Image = SystemIcons.Application.ToBitmap();
+        }
+
+        Label lblTargetName = new Label() {
+            Text = fileName,
+            Location = new Point(62, 14),
+            Size = new Size(428, 20),
+            Font = new Font("Segoe UI", 10.5F, FontStyle.Bold),
+            ForeColor = Color.FromArgb(24, 28, 32),
+            AutoEllipsis = true
+        };
+
+        Label lblTargetDir = new Label() {
+            Text = primaryPath,
+            Location = new Point(63, 34),
+            Size = new Size(427, 16),
+            Font = new Font("Segoe UI", 8.5F, FontStyle.Regular),
+            ForeColor = Color.FromArgb(110, 118, 128),
+            AutoEllipsis = true
+        };
+
+        // --- Locking Process Info Card ---
+        lockCard = new Panel() {
+            Location = new Point(20, 58),
+            Size = new Size(470, 78),
             BackColor = Color.White
         };
-
-        Label lblTitle = new Label() {
-            Text = "File In Use",
-            Location = new Point(20, 14),
-            Size = new Size(410, 20),
-            Font = new Font("Segoe UI", 10.5F, FontStyle.Bold),
-            ForeColor = Color.FromArgb(20, 20, 20)
+        lockCard.Paint += (s, pe) => {
+            using (Pen p = new Pen(Color.FromArgb(226, 230, 236), 1)) {
+                pe.Graphics.DrawRectangle(p, 0, 0, lockCard.Width - 1, lockCard.Height - 1);
+            }
         };
 
-        Label lblPath = new Label() {
-            Text = displayPath,
-            Location = new Point(20, 38),
-            Size = new Size(410, 18),
-            Font = new Font("Segoe UI", 9F, FontStyle.Regular),
-            ForeColor = Color.FromArgb(70, 70, 70),
-            AutoEllipsis = true
+        picProcessIcon = new PictureBox() {
+            Location = new Point(14, 14),
+            Size = new Size(24, 24),
+            SizeMode = PictureBoxSizeMode.CenterImage,
+            Image = SystemIcons.Information.ToBitmap()
         };
 
-        lblLock = new Label() {
-            Text = "Detecting locking process...",
-            Location = new Point(20, 62),
-            Size = new Size(410, 36),
+        Label lblLockHeader = new Label() {
+            Text = "Active Lock Detected",
+            Location = new Point(46, 12),
+            Size = new Size(410, 16),
+            Font = new Font("Segoe UI", 8.5F, FontStyle.Bold),
+            ForeColor = Color.FromArgb(210, 55, 45)
+        };
+
+        lblLockProcess = new Label() {
+            Text = "Analyzing background locking processes...",
+            Location = new Point(46, 30),
+            Size = new Size(414, 38),
             Font = new Font("Segoe UI", 8.5F, FontStyle.Regular),
-            ForeColor = Color.FromArgb(180, 40, 30),
+            ForeColor = Color.FromArgb(60, 66, 74),
             AutoEllipsis = true
         };
 
-        mainPanel.Controls.Add(lblTitle);
-        mainPanel.Controls.Add(lblPath);
-        mainPanel.Controls.Add(lblLock);
+        lockCard.Controls.Add(picProcessIcon);
+        lockCard.Controls.Add(lblLockHeader);
+        lockCard.Controls.Add(lblLockProcess);
 
         Panel bottomBar = new Panel() {
             Dock = DockStyle.Bottom,
