@@ -181,17 +181,24 @@ internal static class Uninstaller {
     private static void ShowIntegratedPrompt(IntPtr explorerDialogHwnd, List<string> childTexts) {
         try {
             isPromptShowing = true;
-            List<string> candidatePaths = GetExplorerSelectedPaths();
-            if (candidatePaths.Count == 0) {
-                foreach (string text in childTexts) {
-                    if (File.Exists(text) || Directory.Exists(text)) candidatePaths.Add(text);
+
+            // Instantly extract candidate path from dialog text before touching COM
+            List<string> candidatePaths = new List<string>();
+            foreach (string text in childTexts) {
+                if (File.Exists(text) || Directory.Exists(text)) {
+                    candidatePaths.Add(text);
                 }
+            }
+
+            // Fall back to Explorer active selection if full path wasn't in text
+            if (candidatePaths.Count == 0) {
+                candidatePaths = GetExplorerSelectedPaths();
             }
 
             IntegratedPromptForm.UserChoice choice = IntegratedPromptForm.UserChoice.Cancel;
             List<ProcessItem> lockingProcesses = new List<ProcessItem>();
 
-            using (var form = new IntegratedPromptForm(candidatePaths, childTexts)) {
+            using (var form = new IntegratedPromptForm(candidatePaths)) {
                 ThreadPool.QueueUserWorkItem(s => {
                     try {
                         UnlockerForm.InitFileTypeIndex();
@@ -205,6 +212,7 @@ internal static class Uninstaller {
                 choice = form.SelectedChoice;
             }
 
+            // Instantly dismiss Explorer error prompt
             SendMessage(explorerDialogHwnd, WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
             PostMessage(explorerDialogHwnd, WM_COMMAND, (IntPtr)2, IntPtr.Zero);
 
