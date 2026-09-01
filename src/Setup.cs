@@ -706,6 +706,8 @@ internal class SetupWizardForm : Form {
             return;
         }
 
+        InstalledDirectory = targetDir;
+
         btnInstall.Enabled = false;
         btnBrowse.Enabled = false;
         txtPath.Enabled = false;
