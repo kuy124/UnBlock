@@ -949,6 +949,13 @@ internal class IntegratedPromptForm : Form {
         this.AcceptButton = btnKill;
     }
 
+    protected override void OnShown(EventArgs e) {
+        base.OnShown(e);
+        this.Activate();
+        this.BringToFront();
+        Uninstaller.SetForegroundWindow(this.Handle);
+    }
+
     public void UpdateLockDetails(List<ProcessItem> lockingProcesses) {
         if (this.IsDisposed || !this.IsHandleCreated) return;
         try {
