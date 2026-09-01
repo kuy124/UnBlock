@@ -117,7 +117,7 @@ internal static class Setup {
         using (SetupWizardForm wizard = new SetupWizardForm(sources, existingDir, customDir, developerCopy || keepSetup)) {
             Application.Run(wizard);
             if (wizard.InstallSucceeded && !developerCopy && !keepSetup) {
-                SpawnSelfCleanup(Process.GetCurrentProcess().Id, setupExe, srcDir);
+                PerformCleanup(baseDir, setupExe, srcDir, wizard.InstalledDirectory);
             }
         }
     }
