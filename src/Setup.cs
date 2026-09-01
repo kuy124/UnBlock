@@ -108,7 +108,9 @@ internal static class Setup {
                                (!string.IsNullOrEmpty(existingDir) ? existingDir :
                                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "UnBlock"));
             ExecuteInstall(sources, targetDir, true, false);
-            if (!developerCopy && !keepSetup) SpawnSelfCleanup(Process.GetCurrentProcess().Id, setupExe, srcDir);
+            if (!developerCopy && !keepSetup) {
+                PerformCleanup(baseDir, setupExe, srcDir, targetDir);
+            }
             return;
         }
 
