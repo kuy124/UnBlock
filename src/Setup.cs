@@ -609,7 +609,6 @@ internal class SetupWizardForm : Form {
     }
 
     private void BuildUI(string customDir) {
-        // --- Header Banner ---
         headerPanel = new Panel() {
             Dock = DockStyle.Top,
             Height = 72,
@@ -635,7 +634,6 @@ internal class SetupWizardForm : Form {
         headerPanel.Controls.Add(lblTitle);
         headerPanel.Controls.Add(lblSubtitle);
 
-        // --- Bottom Action Bar ---
         Panel bottomBar = new Panel() {
             Dock = DockStyle.Bottom,
             Height = 56,
@@ -673,7 +671,6 @@ internal class SetupWizardForm : Form {
         bottomBar.Controls.Add(btnInstall);
         bottomBar.Controls.Add(btnFinish);
 
-        // --- Main Content Area ---
         contentPanel = new Panel() {
             Dock = DockStyle.Fill,
             Padding = new Padding(24, 16, 24, 10),
