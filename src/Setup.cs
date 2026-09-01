@@ -467,6 +467,60 @@ internal static class Setup {
         Environment.Exit(0);
     }
 
+    private static void NavigateExplorerToParent(string dir) {
+        if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir)) return;
+        try {
+            string parentDir = Path.GetDirectoryName(Path.GetFullPath(dir).TrimEnd('\\', '/'));
+            if (string.IsNullOrEmpty(parentDir) || !Directory.Exists(parentDir)) return;
+
+            Type shellType = Type.GetTypeFromProgID("Shell.Application");
+            if (shellType == null) return;
+
+            object shell = Activator.CreateInstance(shellType);
+            object windows = shellType.InvokeMember("Windows", BindingFlags.InvokeMethod, null, shell, null);
+            int count = (int)windows.GetType().InvokeMember("Count", BindingFlags.GetProperty, null, windows, null);
+            string cleanTarget = Path.GetFullPath(dir).TrimEnd('\\', '/');
+
+            for (int i = 0; i < count; i++) {
+                try {
+                    object window = windows.GetType().InvokeMember("Item", BindingFlags.InvokeMethod, null, windows, new object[] { i });
+                    if (window == null) continue;
+
+                    string currentPath = null;
+                    try {
+                        object doc = window.GetType().InvokeMember("Document", BindingFlags.GetProperty, null, window, null);
+                        if (doc != null) {
+                            object folder = doc.GetType().InvokeMember("Folder", BindingFlags.GetProperty, null, doc, null);
+                            if (folder != null) {
+                                object self = folder.GetType().InvokeMember("Self", BindingFlags.GetProperty, null, folder, null);
+                                if (self != null) {
+                                    currentPath = (string)self.GetType().InvokeMember("Path", BindingFlags.GetProperty, null, self, null);
+                                }
+                            }
+                        }
+                    } catch { }
+
+                    if (string.IsNullOrEmpty(currentPath)) {
+                        try {
+                            string url = (string)window.GetType().InvokeMember("LocationURL", BindingFlags.GetProperty, null, window, null);
+                            if (!string.IsNullOrEmpty(url) && url.StartsWith("file://", StringComparison.OrdinalIgnoreCase)) {
+                                currentPath = new Uri(url).LocalPath;
+                            }
+                        } catch { }
+                    }
+
+                    if (!string.IsNullOrEmpty(currentPath)) {
+                        string cleanCurrent = Path.GetFullPath(currentPath).TrimEnd('\\', '/');
+                        if (string.Equals(cleanCurrent, cleanTarget, StringComparison.OrdinalIgnoreCase) ||
+                            cleanCurrent.StartsWith(cleanTarget + "\\", StringComparison.OrdinalIgnoreCase)) {
+                            window.GetType().InvokeMember("Navigate", BindingFlags.InvokeMethod, null, window, new object[] { parentDir });
+                        }
+                    }
+                } catch { }
+            }
+        } catch { }
+    }
+
     private static void DeleteDirectoryWithRetry(string path) {
         for (int i = 0; i < 6; i++) {
             try {
