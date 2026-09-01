@@ -453,6 +453,7 @@ internal static class Uninstaller {
 
     private static void DeleteDirectoryWithRetry(string path) {
         if (string.IsNullOrEmpty(path) || !Directory.Exists(path)) return;
+        NavigateExplorerToParent(path);
         for (int i = 0; i < 6; i++) {
             try {
                 foreach (string file in Directory.GetFiles(path, "*", SearchOption.AllDirectories)) {
