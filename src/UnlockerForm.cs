@@ -599,9 +599,7 @@ public partial class UnlockerForm : Form {
             return;
         }
 
-        bool skipAllLocked = false;
-
-        // Check if locking processes are actively detected upfront
+        // Check if locking processes are actively detected
         bool hasLockingProcesses = false;
         foreach (var pi in currentScanResults) {
             if (pi != null && pi.Pid != 4) {
@@ -611,17 +609,16 @@ public partial class UnlockerForm : Form {
         }
 
         if (hasLockingProcesses) {
-            string inUsePrompt = "One or more targets are locked by background processes.\n\n" +
-                                 "Choose 'Kill & Delete' to terminate them, or 'Skip All' to bypass locked items and delete only the non-locked files.";
-            using (var prompt = new DeletePromptForm("Active Lock(s) Detected", 0, inUsePrompt, true)) {
-                prompt.ShowDialog(this);
-                if (prompt.Result == DeletePromptResult.Cancel) return;
-                if (prompt.Result == DeletePromptResult.Skip || prompt.Result == DeletePromptResult.SkipAll) {
-                    skipAllLocked = true;
-                } else if (prompt.Result == DeletePromptResult.KillAndDelete) {
-                    foreach (var pi in currentScanResults) {
-                        if (pi != null && pi.Pid != 4) KillProcessSafely(pi.Pid, pi.Name);
-                    }
+            string inUsePrompt = "This cannot be removed because an application is currently using it.\n\n" +
+                                 "Do you want to kill the locking process(es) first using UnBlock and delete it?";
+            DialogResult dr = MessageBox.Show(inUsePrompt, "Target In Use - UnBlock", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
+            if (dr != DialogResult.Yes) {
+                return;
+            }
+
+            foreach (var pi in currentScanResults) {
+                if (pi != null && pi.Pid != 4) {
+                    KillProcessSafely(pi.Pid, pi.Name);
                 }
             }
         } else {
@@ -677,35 +674,18 @@ public partial class UnlockerForm : Form {
 
             // If deletion failed due to sharing violation, lock violation, or access denial (in use)
             if (!success && (win32Err == 32 || win32Err == 33 || win32Err == 5)) {
-                if (skipAllLocked) {
-                    report.AppendLine("  [Skipped] Locked file skipped by user choice.");
-                    report.AppendLine();
-                    continue;
-                }
+                string promptMsg = string.Format("'{0}' cannot be removed because an application is currently using it ({1}).\n\n" +
+                                                 "Do you want to terminate the locking process(es) first using UnBlock and retry deleting it?", 
+                                                 Path.GetFileName(path), GetSystemErrorMessage(win32Err));
 
-                DeletePromptResult userChoice;
-                using (var prompt = new DeletePromptForm(path, win32Err, GetSystemErrorMessage(win32Err), false)) {
-                    prompt.ShowDialog(this);
-                    userChoice = prompt.Result;
-                }
-
-                if (userChoice == DeletePromptResult.Skip) {
-                    report.AppendLine("  [Skipped] Locked file skipped by user.");
-                    report.AppendLine();
-                    continue;
-                } else if (userChoice == DeletePromptResult.SkipAll) {
-                    skipAllLocked = true;
-                    report.AppendLine("  [Skipped] Locked file skipped by user.");
-                    report.AppendLine();
-                    continue;
-                } else if (userChoice == DeletePromptResult.Cancel) {
-                    report.AppendLine("  [Cancelled] Remaining deletions aborted by user.");
-                    break;
-                } else if (userChoice == DeletePromptResult.KillAndDelete) {
+                if (MessageBox.Show(promptMsg, "File In Use - Kill & Delete?", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.Yes) {
+                    // Probe and terminate any processes holding locks on this path
                     try {
                         var specificScan = RunFastHandleScan(new HashSet<string>(new[] { path }, StringComparer.OrdinalIgnoreCase), true, delegate { });
                         foreach (var pi in specificScan) {
-                            if (pi != null && pi.Pid != 4) KillProcessSafely(pi.Pid, pi.Name);
+                            if (pi != null && pi.Pid != 4) {
+                                KillProcessSafely(pi.Pid, pi.Name);
+                            }
                         }
                     } catch { }
 
