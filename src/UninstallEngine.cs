@@ -57,7 +57,52 @@ internal static class Uninstaller {
     private const int SW_HIDE = 0;
     private const uint WM_CLOSE = 0x0010;
     private const uint WM_COMMAND = 0x0111;
+    private const uint BM_CLICK = 0x00F5;
+    private const uint BM_SETCHECK = 0x00F1;
     private const uint MOVEFILE_DELAY_UNTIL_REBOOT = 0x00000004;
+
+    private static bool TriggerExplorerButton(IntPtr parentHwnd, string buttonTextSubstring) {
+        bool clicked = false;
+        EnumChildWindows(parentHwnd, delegate(IntPtr hWnd, IntPtr l) {
+            StringBuilder sb = new StringBuilder(64);
+            GetClassName(hWnd, sb, sb.Capacity);
+            if (sb.ToString().Equals("Button", StringComparison.OrdinalIgnoreCase)) {
+                int len = GetWindowTextLength(hWnd);
+                if (len > 0) {
+                    StringBuilder text = new StringBuilder(len + 1);
+                    GetWindowText(hWnd, text, text.Capacity);
+                    string s = text.ToString().Replace("&", "");
+                    if (s.IndexOf(buttonTextSubstring, StringComparison.OrdinalIgnoreCase) >= 0) {
+                        SendMessage(hWnd, BM_CLICK, IntPtr.Zero, IntPtr.Zero);
+                        clicked = true;
+                        return false;
+                    }
+                }
+            }
+            return true;
+        }, IntPtr.Zero);
+        return clicked;
+    }
+
+    private static void CheckExplorerDoForAll(IntPtr parentHwnd) {
+        EnumChildWindows(parentHwnd, delegate(IntPtr hWnd, IntPtr l) {
+            StringBuilder sb = new StringBuilder(64);
+            GetClassName(hWnd, sb, sb.Capacity);
+            if (sb.ToString().Equals("Button", StringComparison.OrdinalIgnoreCase)) {
+                int len = GetWindowTextLength(hWnd);
+                if (len > 0) {
+                    StringBuilder text = new StringBuilder(len + 1);
+                    GetWindowText(hWnd, text, text.Capacity);
+                    string s = text.ToString().Replace("&", "");
+                    if (s.IndexOf("all current items", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                        s.IndexOf("Do this for all", StringComparison.OrdinalIgnoreCase) >= 0) {
+                        SendMessage(hWnd, BM_SETCHECK, (IntPtr)1, IntPtr.Zero);
+                    }
+                }
+            }
+            return true;
+        }, IntPtr.Zero);
+    }
 
     private static readonly Dictionary<IntPtr, DateTime> handledDialogs = new Dictionary<IntPtr, DateTime>();
     private static readonly object handledLock = new object();
@@ -212,7 +257,21 @@ internal static class Uninstaller {
                 choice = form.SelectedChoice;
             }
 
-            // Instantly dismiss Explorer error prompt
+            if (choice == IntegratedPromptForm.UserChoice.Skip) {
+                if (!TriggerExplorerButton(explorerDialogHwnd, "Skip")) {
+                    PostMessage(explorerDialogHwnd, WM_COMMAND, (IntPtr)5 /* IDIGNORE */, IntPtr.Zero);
+                }
+                return;
+            }
+            else if (choice == IntegratedPromptForm.UserChoice.SkipAll) {
+                CheckExplorerDoForAll(explorerDialogHwnd);
+                if (!TriggerExplorerButton(explorerDialogHwnd, "Skip")) {
+                    PostMessage(explorerDialogHwnd, WM_COMMAND, (IntPtr)5 /* IDIGNORE */, IntPtr.Zero);
+                }
+                return;
+            }
+
+            // Instantly dismiss Explorer error prompt if cancelling or proceeding
             SendMessage(explorerDialogHwnd, WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
             PostMessage(explorerDialogHwnd, WM_COMMAND, (IntPtr)2, IntPtr.Zero);
 
@@ -789,7 +848,7 @@ internal class UninstallWizardForm : Form {
 
 // Modern, ultra-fast Fluent File-in-Use Modal Dialog
 internal class IntegratedPromptForm : Form {
-    public enum UserChoice { None, KillAndDelete, UnlockAndDelete, Cancel }
+    public enum UserChoice { None, KillAndDelete, UnlockAndDelete, Skip, SkipAll, Cancel }
     public UserChoice SelectedChoice { get; private set; }
 
     private Label lblLockProcess;
@@ -807,7 +866,7 @@ internal class IntegratedPromptForm : Form {
         this.MinimizeBox = false;
         this.ShowInTaskbar = false;
         this.StartPosition = FormStartPosition.CenterScreen;
-        this.ClientSize = new Size(510, 215);
+        this.ClientSize = new Size(580, 215);
         this.BackColor = Color.FromArgb(249, 250, 252);
         this.TopMost = true;
         this.Font = new Font("Segoe UI", 9F, FontStyle.Regular);
@@ -833,7 +892,7 @@ internal class IntegratedPromptForm : Form {
         Label lblTargetName = new Label() {
             Text = fileName,
             Location = new Point(62, 14),
-            Size = new Size(428, 20),
+            Size = new Size(498, 20),
             Font = new Font("Segoe UI", 10.5F, FontStyle.Bold),
             ForeColor = Color.FromArgb(24, 28, 32),
             AutoEllipsis = true
@@ -842,7 +901,7 @@ internal class IntegratedPromptForm : Form {
         Label lblTargetDir = new Label() {
             Text = primaryPath,
             Location = new Point(63, 34),
-            Size = new Size(427, 16),
+            Size = new Size(497, 16),
             Font = new Font("Segoe UI", 8.5F, FontStyle.Regular),
             ForeColor = Color.FromArgb(110, 118, 128),
             AutoEllipsis = true
@@ -851,7 +910,7 @@ internal class IntegratedPromptForm : Form {
         // --- Locking Process Info Card ---
         lockCard = new Panel() {
             Location = new Point(20, 58),
-            Size = new Size(470, 78),
+            Size = new Size(540, 78),
             BackColor = Color.White
         };
         lockCard.Paint += (s, pe) => {
@@ -870,7 +929,7 @@ internal class IntegratedPromptForm : Form {
         Label lblLockHeader = new Label() {
             Text = "Active Lock Detected",
             Location = new Point(46, 12),
-            Size = new Size(410, 16),
+            Size = new Size(480, 16),
             Font = new Font("Segoe UI", 8.5F, FontStyle.Bold),
             ForeColor = Color.FromArgb(210, 55, 45)
         };
@@ -878,7 +937,7 @@ internal class IntegratedPromptForm : Form {
         lblLockProcess = new Label() {
             Text = "Analyzing background locking processes...",
             Location = new Point(46, 30),
-            Size = new Size(414, 38),
+            Size = new Size(484, 38),
             Font = new Font("Segoe UI", 8.5F, FontStyle.Regular),
             ForeColor = Color.FromArgb(60, 66, 74),
             AutoEllipsis = true
@@ -899,8 +958,8 @@ internal class IntegratedPromptForm : Form {
 
         btnKill = new Button() {
             Text = "Kill && Delete",
-            Size = new Size(125, 32),
-            Location = new Point(150, 10),
+            Size = new Size(110, 32),
+            Location = new Point(15, 10),
             FlatStyle = FlatStyle.Flat,
             BackColor = Color.FromArgb(215, 45, 35),
             ForeColor = Color.White,
@@ -912,8 +971,8 @@ internal class IntegratedPromptForm : Form {
 
         btnUnlock = new Button() {
             Text = "Unlock && Delete",
-            Size = new Size(135, 32),
-            Location = new Point(283, 10),
+            Size = new Size(120, 32),
+            Location = new Point(133, 10),
             FlatStyle = FlatStyle.Flat,
             BackColor = Color.FromArgb(32, 140, 75),
             ForeColor = Color.White,
@@ -923,10 +982,36 @@ internal class IntegratedPromptForm : Form {
         btnUnlock.FlatAppearance.BorderSize = 0;
         btnUnlock.Click += (s, e) => { this.SelectedChoice = UserChoice.UnlockAndDelete; this.Close(); };
 
+        Button btnSkip = new Button() {
+            Text = "Skip",
+            Size = new Size(72, 32),
+            Location = new Point(261, 10),
+            FlatStyle = FlatStyle.Flat,
+            BackColor = Color.FromArgb(226, 230, 236),
+            ForeColor = Color.FromArgb(40, 45, 50),
+            Font = new Font("Segoe UI", 8.8F, FontStyle.Bold),
+            Cursor = Cursors.Hand
+        };
+        btnSkip.FlatAppearance.BorderSize = 0;
+        btnSkip.Click += (s, e) => { this.SelectedChoice = UserChoice.Skip; this.Close(); };
+
+        Button btnSkipAll = new Button() {
+            Text = "Skip All",
+            Size = new Size(82, 32),
+            Location = new Point(341, 10),
+            FlatStyle = FlatStyle.Flat,
+            BackColor = Color.FromArgb(226, 230, 236),
+            ForeColor = Color.FromArgb(40, 45, 50),
+            Font = new Font("Segoe UI", 8.8F, FontStyle.Bold),
+            Cursor = Cursors.Hand
+        };
+        btnSkipAll.FlatAppearance.BorderSize = 0;
+        btnSkipAll.Click += (s, e) => { this.SelectedChoice = UserChoice.SkipAll; this.Close(); };
+
         Button btnCancel = new Button() {
             Text = "Cancel",
-            Size = new Size(80, 32),
-            Location = new Point(424, 10),
+            Size = new Size(76, 32),
+            Location = new Point(431, 10),
             FlatStyle = FlatStyle.Flat,
             BackColor = Color.FromArgb(226, 230, 236),
             ForeColor = Color.FromArgb(40, 45, 50),
@@ -938,6 +1023,8 @@ internal class IntegratedPromptForm : Form {
 
         bottomBar.Controls.Add(btnKill);
         bottomBar.Controls.Add(btnUnlock);
+        bottomBar.Controls.Add(btnSkip);
+        bottomBar.Controls.Add(btnSkipAll);
         bottomBar.Controls.Add(btnCancel);
 
         this.Controls.Add(picTargetIcon);
