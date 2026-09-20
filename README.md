@@ -50,9 +50,10 @@
 ### Option B: Standalone Mode
 Launch UnBlock from its install folder or Start Menu without right-clicking.
 * Use the **<code>+ File</code>** and **<code>+ Folder</code>** buttons in the header to add items to the list.
+* Use the **<code>Dark</code>** / **<code>Light</code>** button in the header to switch the interface theme. The choice is remembered, and a fresh install follows your Windows app theme.
 
-### During Explorer Deletion
-When Windows Explorer cannot delete a file that is in use, UnBlock replaces the stock error dialog with its own prompt. From it you kill the locking process and delete, or unlock the handles and delete.
+### During Explorer File-in-Use Prompts
+When Windows Explorer reports that a file or folder is in use, UnBlock replaces the stock error dialog with its own prompt. From that popup you can choose **Kill & Recycle**, **Kill & Rename**, or **Kill & Move** without returning to the Explorer right-click menu. Rename opens a Rename-only dialog, Move opens a Move-only dialog, and Recycle opens a matching Recycle-only review. Each dialog shows the target and detected lockers, provides only its matching kill action, and lets you go Back or Cancel. UnBlock refreshes the scan before termination, asks you to review a changed locker list again, and verifies that the lock is gone before changing the file.
 
 ---
 
@@ -74,6 +75,37 @@ Select the locking program and choose an action:
 * **Kill Process / Kill All:** closes the program holding the lock. Use this when the application is frozen, unresponsive, or running from the folder you want to delete.
 
 > <i>Note: Windows System Kernel processes (PID 4) cannot be terminated. UnBlock still identifies them so you know why the resource is occupied.</i>
+
+## File Actions
+
+Every normal file action is a **kill-before-action** workflow: UnBlock refreshes the lock scan, lists only processes locking the selected target, asks for confirmation, terminates those processes (never PID 4 or unrelated processes), verifies that the locks are gone, and then performs the requested operation. If no locker is found, the action continues without terminating any process. Confirmation warns that terminated applications may lose unsaved work, and the result reports each target separately.
+
+The grouped action bar provides:
+
+* **Kill & Recycle** — move targets to the Recycle Bin by default
+* **Kill & Rename**, **Kill & Move**, and **Kill & Copy**
+* **Kill & Permanent Delete** and **Kill & Delete at Restart** under the **More** menu
+* **Repair Permissions** as a separate, explicit advanced action; it does not automatically terminate processes
+
+Frequent actions sit on one command strip and the rest live under **More**, so the strip stays readable. Buttons are sized from their own labels and wrap to a new row when the window is narrow, so a label is never cut off.
+
+Protected Windows and System targets are blocked from normal destructive actions. An administrator must deliberately choose the separate advanced action to permanently remove one. If a locker requires elevation, UnBlock serializes the exact pending action, resumes it in the elevated process, and reports the final per-target result back to the original window.
+
+The details view includes executable path, account, parent PID, architecture, command line when readable, and exact locked paths.
+
+You can drag files and folders onto the window, select several processes at once, reload a scan, cancel a scan, clear the target list, and open a process-details view by double-clicking a result.
+
+## Command Line
+
+The same executable can run without the window:
+
+```text
+Unlocker.exe --help
+Unlocker.exe --version
+Unlocker.exe [--json] [--wait] [--kill] <file-or-folder> [...]
+```
+
+`--json` writes versioned results with targets, process details, exact locked paths, access, severity, and lock source. `--wait` rescans until the locks are gone. `--kill` terminates processes that can be terminated and rescans. Results use exit code `0` for no unresolved locks, `1` for remaining locks or incomplete actions, `2` for invalid arguments, `3` for permission or scan failure, and `4` for cancellation or timeout.
 
 ---
 

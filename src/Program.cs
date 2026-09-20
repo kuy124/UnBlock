@@ -46,6 +46,17 @@ internal static class Program {
             return;
         }
 
+        if (args.Length >= 2 && args[0] == "[PENDING_ACTION]") {
+            Environment.ExitCode = FileActionCoordinator.RunPendingAction(args[1]);
+            return;
+        }
+
+        CommandLineOptions commandLine = CommandLineOptions.Parse(args);
+        if (commandLine.IsCli) {
+            Environment.ExitCode = CommandLineRunner.Run(commandLine);
+            return;
+        }
+
         // --- DEDICATED UNINSTALLER BINARY (uninstall.exe) ---
         try {
             if (Path.GetFileNameWithoutExtension(Application.ExecutablePath).Equals("uninstall", StringComparison.OrdinalIgnoreCase)) {

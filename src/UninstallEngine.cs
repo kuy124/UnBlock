@@ -18,6 +18,21 @@ internal static class Uninstaller {
     [DllImport("user32.dll")]
     private static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
 
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern IntPtr SetWinEventHook(uint eventMin, uint eventMax, IntPtr hmodWinEventProc, WinEventProc lpfnWinEventProc, uint idProcess, uint idThread, uint flags);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool UnhookWinEvent(IntPtr hWinEventHook);
+
+    [DllImport("user32.dll")]
+    private static extern int GetMessage(out MSG message, IntPtr hWnd, uint minFilter, uint maxFilter);
+
+    [DllImport("user32.dll")]
+    private static extern bool TranslateMessage(ref MSG message);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr DispatchMessage(ref MSG message);
+
     [DllImport("user32.dll")]
     private static extern bool EnumChildWindows(IntPtr hWnd, EnumWindowsProc lpEnumFunc, IntPtr lParam);
 
@@ -81,18 +96,42 @@ internal static class Uninstaller {
     }
 
     private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+    private delegate void WinEventProc(IntPtr hook, uint eventType, IntPtr hWnd, int idObject, int idChild, uint eventThread, uint eventTime);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MSG {
+        public IntPtr hWnd;
+        public uint message;
+        public IntPtr wParam;
+        public IntPtr lParam;
+        public uint time;
+        public int ptX;
+        public int ptY;
+    }
 
     private const uint GW_OWNER = 4;
     private const uint GA_ROOTOWNER = 3;
     private const uint GA_ROOT = 2;
     private const int SW_HIDE = 0;
+    private const int SW_SHOW = 5;
     private const uint WM_CLOSE = 0x0010;
     private const uint WM_COMMAND = 0x0111;
     private const uint MOVEFILE_DELAY_UNTIL_REBOOT = 0x00000004;
+    private const uint EVENT_OBJECT_SHOW = 0x8002;
+    private const uint WINEVENT_OUTOFCONTEXT = 0x0000;
+    private const int OBJID_WINDOW = 0;
+
+    private static WinEventProc windowEventProc;
 
     private static readonly Dictionary<IntPtr, DateTime> handledDialogs = new Dictionary<IntPtr, DateTime>();
     private static readonly object handledLock = new object();
     private static volatile bool isPromptShowing = false;
+    // After a prompt closes, ignore new "File in Use" dialogs for a short window. Explorer often
+    // re-shows the same dialog for a retried operation, which otherwise produced a second modal.
+    private static DateTime suppressUntilUtc = DateTime.MinValue;
+    private static readonly TimeSpan PostPromptCooldown = TimeSpan.FromMilliseconds(1500);
+    // The single prompt window that may exist at any time; a second creation is refused.
+    private static IntegratedPromptForm activePrompt;
 
     private class ExplorerTabCandidate {
         public object Window;
@@ -108,37 +147,58 @@ internal static class Uninstaller {
     }
 
     internal static void RunWatcherMode(string targetDir) {
-        string targetExe = Path.Combine(targetDir, "Unlocker.exe");
+        bool mutexCreated;
+        using (Mutex watcherMutex = new Mutex(true, @"Global\UnBlock_Watcher_Mutex", out mutexCreated)) {
+            if (!mutexCreated) return;
 
-        Thread dialogMonitorThread = new Thread(RunExplorerDialogMonitor);
-        dialogMonitorThread.IsBackground = true;
-        dialogMonitorThread.SetApartmentState(ApartmentState.STA);
-        dialogMonitorThread.Start();
+            string targetExe = Path.Combine(targetDir, "Unlocker.exe");
 
-        while (true) {
-            Thread.Sleep(1500);
+            Thread dialogMonitorThread = new Thread(RunExplorerDialogMonitor);
+            dialogMonitorThread.IsBackground = true;
+            dialogMonitorThread.SetApartmentState(ApartmentState.STA);
+            dialogMonitorThread.Start();
 
-            bool isAppAvailable = File.Exists(targetExe);
-            bool keysCurrentlyRegistered = AreContextKeysRegistered();
+            while (true) {
+                Thread.Sleep(1500);
 
-            if (isAppAvailable && !keysCurrentlyRegistered) {
-                RestoreRegistryKeys(targetExe);
-            }
-            else if (!isAppAvailable && keysCurrentlyRegistered) {
-                PerformUninstallSteps(false);
-                SpawnCleanupHelper(Process.GetCurrentProcess().Id,
-                    Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "UnBlock"));
-                Environment.Exit(0);
+                bool isAppAvailable = File.Exists(targetExe);
+                bool keysCurrentlyRegistered = AreContextKeysRegistered();
+
+                if (isAppAvailable && !keysCurrentlyRegistered) {
+                    RestoreRegistryKeys(targetExe);
+                }
+                else if (!isAppAvailable && keysCurrentlyRegistered) {
+                    PerformUninstallSteps(false);
+                    SpawnCleanupHelper(Process.GetCurrentProcess().Id,
+                        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "UnBlock"));
+                    Environment.Exit(0);
+                }
             }
         }
     }
 
     private static void RunExplorerDialogMonitor() {
-        while (true) {
+        windowEventProc = delegate(IntPtr hook, uint eventType, IntPtr hWnd, int idObject, int idChild, uint eventThread, uint eventTime) {
+            if (eventType == EVENT_OBJECT_SHOW && idObject == OBJID_WINDOW && hWnd != IntPtr.Zero) {
+                try { CheckWindowForFileInUse(hWnd, IntPtr.Zero); } catch { }
+            }
+        };
+        IntPtr eventHook = IntPtr.Zero;
+        try { eventHook = SetWinEventHook(EVENT_OBJECT_SHOW, EVENT_OBJECT_SHOW, IntPtr.Zero, windowEventProc, 0, 0, WINEVENT_OUTOFCONTEXT); } catch { }
+        if (eventHook != IntPtr.Zero) {
             try {
-                EnumWindows(CheckWindowForFileInUse, IntPtr.Zero);
+                MSG message;
+                while (GetMessage(out message, IntPtr.Zero, 0, 0) > 0) {
+                    TranslateMessage(ref message);
+                    DispatchMessage(ref message);
+                }
             } catch { }
-            Thread.Sleep(50);
+            try { UnhookWinEvent(eventHook); } catch { }
+            return;
+        }
+        while (true) {
+            try { EnumWindows(CheckWindowForFileInUse, IntPtr.Zero); } catch { }
+            Thread.Sleep(250);
         }
     }
 
@@ -199,18 +259,7 @@ internal static class Uninstaller {
 
         if (!isFileInUseTitle && !hasInUseText) return true;
 
-        lock (handledLock) {
-            DateTime now = DateTime.UtcNow;
-            List<IntPtr> deadHandles = new List<IntPtr>();
-            foreach (var kvp in handledDialogs) {
-                if (!IsWindow(kvp.Key) || (now - kvp.Value).TotalSeconds > 2) deadHandles.Add(kvp.Key);
-            }
-            foreach (var dead in deadHandles) handledDialogs.Remove(dead);
-
-            if (isPromptShowing) return true;
-            if (handledDialogs.ContainsKey(hWnd)) return true;
-            handledDialogs[hWnd] = now;
-        }
+        if (!TryClaimPromptSlot(hWnd)) return true;
 
         // Do not hide the native dialog yet: only hide once candidate paths are confirmed
         Thread uiThread = new Thread(() => ShowIntegratedPrompt(hWnd, childTexts));
@@ -221,10 +270,55 @@ internal static class Uninstaller {
         return true;
     }
 
+    // Single-flight gate: exactly one prompt may run at a time, and a short cooldown after a
+    // prompt closes swallows Explorer's re-shown dialog for the same retried operation. Returns
+    // true when the caller may proceed to show the prompt. Kept internal so it can be tested
+    // without a real window handle.
+    internal static bool TryClaimPromptSlot(IntPtr hWnd) {
+        lock (handledLock) {
+            DateTime now = DateTime.UtcNow;
+            List<IntPtr> deadHandles = new List<IntPtr>();
+            foreach (var kvp in handledDialogs) {
+                if (!IsWindow(kvp.Key) || (now - kvp.Value).TotalSeconds > 2) deadHandles.Add(kvp.Key);
+            }
+            foreach (var dead in deadHandles) handledDialogs.Remove(dead);
+
+            if (isPromptShowing) return false;
+            if (now < suppressUntilUtc) return false;
+            if (activePrompt != null && !activePrompt.IsDisposed) return false;
+            if (handledDialogs.ContainsKey(hWnd)) return false;
+            handledDialogs[hWnd] = now;
+            isPromptShowing = true;
+            return true;
+        }
+    }
+
+    // Test seam: reports whether a prompt currently owns the single-flight slot.
+    internal static bool IsPromptActive { get { return isPromptShowing; } }
+
+    // Test seam: clears the prompt gate and cooldown so a test can exercise it from a clean state.
+    internal static void ResetPromptGateForTest() {
+        lock (handledLock) {
+            handledDialogs.Clear();
+            isPromptShowing = false;
+            suppressUntilUtc = DateTime.MinValue;
+            activePrompt = null;
+        }
+    }
+
+    // Test seam: marks the current prompt as finished, which arms the cooldown like the real
+    // ShowIntegratedPrompt finally block does.
+    internal static void FinishPromptForTest() {
+        activePrompt = null;
+        lock (handledLock) {
+            suppressUntilUtc = DateTime.UtcNow + PostPromptCooldown;
+            isPromptShowing = false;
+        }
+    }
+
     private static void ShowIntegratedPrompt(IntPtr explorerDialogHwnd, List<string> childTexts) {
         try {
-            isPromptShowing = true;
-
+            // The single-flight flag is already claimed by the caller.
             List<string> candidatePaths = GetCandidatePaths(explorerDialogHwnd, childTexts);
             if (candidatePaths.Count == 0) {
                 // If no candidates could be matched, leave native dialog visible so it never vanishes
@@ -235,6 +329,7 @@ internal static class Uninstaller {
             ShowWindow(explorerDialogHwnd, SW_HIDE);
 
             IntegratedPromptForm.UserChoice rememberedChoice = IntegratedPromptForm.UserChoice.None;
+            bool restoreNativeDialog = false;
 
             for (int i = 0; i < candidatePaths.Count; i++) {
                 string targetPath = candidatePaths[i];
@@ -242,9 +337,9 @@ internal static class Uninstaller {
 
                 IntegratedPromptForm.UserChoice choice = rememberedChoice;
                 List<ProcessItem> lockingProcesses = new List<ProcessItem>();
-
                 if (choice == IntegratedPromptForm.UserChoice.None) {
                     using (var form = new IntegratedPromptForm(targetPath, i + 1, candidatePaths.Count)) {
+                        activePrompt = form;
                         ThreadPool.QueueUserWorkItem(s => {
                             try {
                                 UnlockerForm.InitFileTypeIndex();
@@ -255,6 +350,7 @@ internal static class Uninstaller {
                         });
 
                         form.ShowDialog();
+                        activePrompt = null;
                         choice = form.SelectedChoice;
                         if (form.ApplyToAll) {
                             rememberedChoice = choice;
@@ -262,56 +358,188 @@ internal static class Uninstaller {
                     }
                 }
 
-                if (choice == IntegratedPromptForm.UserChoice.Cancel) {
+                while (true) {
+                    if (choice == IntegratedPromptForm.UserChoice.Cancel) {
+                        restoreNativeDialog = true;
+                        break;
+                    }
+                    if (choice == IntegratedPromptForm.UserChoice.Skip) break;
+
+                    if (choice == IntegratedPromptForm.UserChoice.KillAndDelete ||
+                        choice == IntegratedPromptForm.UserChoice.KillAndRename ||
+                        choice == IntegratedPromptForm.UserChoice.KillAndMove) {
+                        FileInUseActionFlowOutcome outcome;
+                        FileActionResult result = RunFileInUseKillActionFlow(targetPath, choice, lockingProcesses, out outcome);
+                        if (outcome == FileInUseActionFlowOutcome.Back) {
+                            choice = IntegratedPromptForm.UserChoice.None;
+                            rememberedChoice = IntegratedPromptForm.UserChoice.None;
+                            using (var form = new IntegratedPromptForm(targetPath, i + 1, candidatePaths.Count)) {
+                                activePrompt = form;
+                                ThreadPool.QueueUserWorkItem(s => {
+                                    try {
+                                        UnlockerForm.InitFileTypeIndex();
+                                        var targetSet = new HashSet<string>(new[] { targetPath }, StringComparer.OrdinalIgnoreCase);
+                                        lockingProcesses = UnlockerForm.RunFastHandleScanDirect(targetSet);
+                                        form.UpdateLockDetails(lockingProcesses);
+                                    } catch { }
+                                });
+                                form.ShowDialog();
+                                activePrompt = null;
+                                choice = form.SelectedChoice;
+                                if (form.ApplyToAll) rememberedChoice = choice;
+                            }
+                            continue;
+                        }
+                        if (result.Status == FileActionStatus.Cancelled) {
+                            restoreNativeDialog = true;
+                            break;
+                        }
+                        if (result.Status != FileActionStatus.Completed) {
+                            ShowFileInUseActionFailure(targetPath, result);
+                            restoreNativeDialog = true;
+                        }
+                        break;
+                    }
+
+                    if (choice == IntegratedPromptForm.UserChoice.UnlockAndDelete) {
+                        if (lockingProcesses.Count == 0) {
+                            lockingProcesses = UnlockerForm.RunFastHandleScanDirect(new HashSet<string>(new[] { targetPath }, StringComparer.OrdinalIgnoreCase));
+                        }
+                        foreach (var proc in lockingProcesses) {
+                            if (proc != null) UnlockerForm.UnlockSafelyDirect(proc.Pid, proc.Handles, proc.Name);
+                        }
+                        try { File.SetAttributes(targetPath, FileAttributes.Normal); } catch { }
+                        FileOperationResult recycleResult = FileOperations.Delete(targetPath, DeleteMode.RecycleBin);
+                        if (!recycleResult.Success) {
+                            ShowFileInUseActionFailure(targetPath, new FileActionResult { Status = FileActionStatus.Failed, ErrorMessage = recycleResult.ErrorMessage });
+                            restoreNativeDialog = true;
+                        }
+                    }
                     break;
                 }
-
-                if (choice == IntegratedPromptForm.UserChoice.Skip) {
-                    continue;
-                }
-
-                if (choice == IntegratedPromptForm.UserChoice.KillAndDelete) {
-                    if (lockingProcesses.Count == 0) {
-                        lockingProcesses = UnlockerForm.RunFastHandleScanDirect(new HashSet<string>(new[] { targetPath }, StringComparer.OrdinalIgnoreCase));
-                    }
-
-                    foreach (var proc in lockingProcesses) {
-                        if (proc != null && proc.Pid != 4) UnlockerForm.KillProcessDirect(proc.Pid, proc.Name);
-                    }
-
-                    try { File.SetAttributes(targetPath, FileAttributes.Normal); } catch { }
-                    UnlockerForm.ResetFilePermissionsDirect(targetPath);
-
-                    int win32Err;
-                    string errorMsg;
-                    if (!UnlockerForm.AttemptDeleteDirect(targetPath, out win32Err, out errorMsg)) {
-                        MoveFileEx(targetPath, null, MOVEFILE_DELAY_UNTIL_REBOOT);
-                    }
-                } else if (choice == IntegratedPromptForm.UserChoice.UnlockAndDelete) {
-                    if (lockingProcesses.Count == 0) {
-                        lockingProcesses = UnlockerForm.RunFastHandleScanDirect(new HashSet<string>(new[] { targetPath }, StringComparer.OrdinalIgnoreCase));
-                    }
-
-                    foreach (var proc in lockingProcesses) {
-                        if (proc != null) UnlockerForm.UnlockSafelyDirect(proc.Pid, proc.Handles, proc.Name);
-                    }
-
-                    try { File.SetAttributes(targetPath, FileAttributes.Normal); } catch { }
-                    UnlockerForm.ResetFilePermissionsDirect(targetPath);
-
-                    int win32Err;
-                    string errorMsg;
-                    if (!UnlockerForm.AttemptDeleteDirect(targetPath, out win32Err, out errorMsg)) {
-                        MoveFileEx(targetPath, null, MOVEFILE_DELAY_UNTIL_REBOOT);
-                    }
-                }
+                if (restoreNativeDialog) break;
             }
 
-            SendMessage(explorerDialogHwnd, WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
-            PostMessage(explorerDialogHwnd, WM_COMMAND, (IntPtr)2, IntPtr.Zero);
+            if (restoreNativeDialog) {
+                ShowWindow(explorerDialogHwnd, SW_SHOW);
+            } else {
+                SendMessage(explorerDialogHwnd, WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
+                PostMessage(explorerDialogHwnd, WM_COMMAND, (IntPtr)2, IntPtr.Zero);
+            }
         } finally {
-            isPromptShowing = false;
+            activePrompt = null;
+            lock (handledLock) {
+                // Briefly ignore new dialogs so Explorer's re-shown dialog for the same retried
+                // operation does not open a second modal right after this one closes.
+                suppressUntilUtc = DateTime.UtcNow + PostPromptCooldown;
+                isPromptShowing = false;
+            }
         }
+    }
+
+    internal static FileActionRequest CreateFileInUseKillRequest(string targetPath, IntegratedPromptForm.UserChoice choice, string newName, string destinationPath) {
+        FileOperationRequest operation = new FileOperationRequest { SourcePath = targetPath };
+        string title;
+        if (choice == IntegratedPromptForm.UserChoice.KillAndDelete) {
+            operation.Kind = FileOperationKind.Delete;
+            operation.DeleteMode = DeleteMode.RecycleBin;
+            title = "Kill & Recycle";
+        } else if (choice == IntegratedPromptForm.UserChoice.KillAndRename) {
+            operation.Kind = FileOperationKind.Rename;
+            operation.DestinationPath = newName;
+            title = "Kill & Rename";
+        } else if (choice == IntegratedPromptForm.UserChoice.KillAndMove) {
+            operation.Kind = FileOperationKind.Move;
+            operation.DestinationPath = destinationPath;
+            title = "Kill & Move";
+        } else {
+            return null;
+        }
+        FileActionRequest request = new FileActionRequest {
+            Title = title,
+            LockActionMode = LockActionMode.DetectedLockersOnly,
+            AllowProtectedTargets = false
+        };
+        request.Operations.Add(operation);
+        return request;
+    }
+
+    private enum FileInUseActionFlowOutcome { Completed, Back, Cancelled, Failed }
+
+    private static FileActionResult RunFileInUseKillActionFlow(string targetPath, IntegratedPromptForm.UserChoice choice, List<ProcessItem> observedLockers, out FileInUseActionFlowOutcome outcome) {
+        outcome = FileInUseActionFlowOutcome.Failed;
+        string newName = null;
+        string destinationPath = null;
+        string observedSignature = FileActionCoordinator.BuildLockerSignature(observedLockers ?? new List<ProcessItem>());
+        string refreshNotice = null;
+
+        while (true) {
+            using (var review = new FileInUseActionReviewForm(targetPath, choice, observedLockers, newName, destinationPath, refreshNotice)) {
+                review.ShowDialog();
+                if (review.Outcome == FileInUseActionReviewOutcome.Back) {
+                    outcome = FileInUseActionFlowOutcome.Back;
+                    return new FileActionResult { Status = FileActionStatus.Cancelled, ErrorMessage = "Action returned to the File in Use menu." };
+                }
+                if (review.Outcome != FileInUseActionReviewOutcome.Confirmed) {
+                    outcome = FileInUseActionFlowOutcome.Cancelled;
+                    return new FileActionResult { Status = FileActionStatus.Cancelled, ErrorMessage = "Action cancelled by the user." };
+                }
+                newName = review.RequestedNewName;
+                destinationPath = review.RequestedDestination;
+            }
+
+            FileActionRequest request = CreateFileInUseKillRequest(targetPath, choice, newName, destinationPath);
+            if (request == null) {
+                outcome = FileInUseActionFlowOutcome.Failed;
+                return new FileActionResult { Status = FileActionStatus.Failed, ErrorMessage = "Unsupported File in Use action." };
+            }
+
+            FileActionPlan plan = FileActionCoordinator.Prepare(request, CancellationToken.None, null);
+            if (!string.IsNullOrEmpty(plan.ErrorMessage)) {
+                outcome = FileInUseActionFlowOutcome.Failed;
+                return new FileActionResult { ActionId = request.ActionId, Status = FileActionStatus.Failed, ErrorMessage = plan.ErrorMessage };
+            }
+
+            if (!string.Equals(observedSignature, plan.LockerSignature, StringComparison.Ordinal)) {
+                observedLockers = plan.Lockers;
+                observedSignature = plan.LockerSignature;
+                refreshNotice = "Lock details were refreshed. Review the updated process list before continuing.";
+                continue;
+            }
+
+            FileActionResult result = ExecuteFileInUseKillAction(request, plan);
+            outcome = result.Status == FileActionStatus.Completed ? FileInUseActionFlowOutcome.Completed :
+                result.Status == FileActionStatus.Cancelled ? FileInUseActionFlowOutcome.Cancelled : FileInUseActionFlowOutcome.Failed;
+            return result;
+        }
+    }
+
+    private static FileActionResult ExecuteFileInUseKillAction(FileActionRequest request, FileActionPlan plan) {
+        FileActionResult result = FileActionCoordinator.ExecuteConfirmed(request, plan, IsCurrentUserElevated(), CancellationToken.None, null);
+        if (result.Status != FileActionStatus.NeedsElevation || !result.CanRetryElevated) return result;
+
+        request.PreviouslyTerminatedPids = result.TerminatedPids;
+        string error;
+        if (!FileActionCoordinator.LaunchElevated(request, out error)) {
+            return new FileActionResult { ActionId = request.ActionId, Status = FileActionStatus.Failed, ErrorMessage = "Elevation was not started: " + error };
+        }
+        return WaitForElevatedFileAction(request.ActionId);
+    }
+
+    private static FileActionResult WaitForElevatedFileAction(string actionId) {
+        DateTime deadline = DateTime.UtcNow.AddSeconds(60);
+        while (DateTime.UtcNow < deadline) {
+            FileActionResult result = FileActionCoordinator.ConsumeResult(actionId);
+            if (result != null) return result;
+            Thread.Sleep(200);
+        }
+        return new FileActionResult { ActionId = actionId, Status = FileActionStatus.Failed, ErrorMessage = "The elevated action did not return a result in time. The target was left unchanged unless the elevated action already completed." };
+    }
+
+    private static void ShowFileInUseActionFailure(string targetPath, FileActionResult result) {
+        string error = result == null ? "The action did not return a result." : result.ErrorMessage;
+        if (string.IsNullOrEmpty(error) && result != null && result.UnresolvablePids.Count > 0) error = "Unresolved locking PID(s): " + string.Join(", ", result.UnresolvablePids.ToArray());
+        MessageBox.Show("UnBlock could not complete the action for:\n" + targetPath + "\n\n" + (error ?? "The target was left unchanged."), "File in Use", MessageBoxButtons.OK, MessageBoxIcon.Warning);
     }
 
     private static IntPtr GetExplorerWindowForDialog(IntPtr dialogHwnd) {
@@ -609,11 +837,14 @@ internal static class Uninstaller {
 
     private static bool AreContextKeysRegistered() {
         try {
-            using (var baseKey = Microsoft.Win32.RegistryKey.OpenBaseKey(Microsoft.Win32.RegistryHive.LocalMachine, Microsoft.Win32.RegistryView.Registry64)) {
-                using (var k = baseKey.OpenSubKey(@"SOFTWARE\Classes\Directory\shell\UnBlock")) {
-                    return k != null;
+            foreach (Microsoft.Win32.RegistryView view in GetRegistryViews()) {
+                using (var baseKey = Microsoft.Win32.RegistryKey.OpenBaseKey(Microsoft.Win32.RegistryHive.LocalMachine, view)) {
+                    using (var k = baseKey.OpenSubKey(@"SOFTWARE\Classes\Directory\shell\UnBlock")) {
+                        if (k != null) return true;
+                    }
                 }
             }
+            return false;
         } catch { return true; }
     }
 
@@ -827,42 +1058,44 @@ internal static class Uninstaller {
     }
 
     private static void CleanRegistryOnly() {
-        try {
-            using (var baseKey = Microsoft.Win32.RegistryKey.OpenBaseKey(Microsoft.Win32.RegistryHive.LocalMachine, Microsoft.Win32.RegistryView.Registry64)) {
+        foreach (Microsoft.Win32.RegistryView view in GetRegistryViews()) {
+            try {
+                using (var baseKey = Microsoft.Win32.RegistryKey.OpenBaseKey(Microsoft.Win32.RegistryHive.LocalMachine, view)) {
                 baseKey.DeleteSubKeyTree(@"SOFTWARE\Classes\*\shell\UnBlock", false);
                 baseKey.DeleteSubKeyTree(@"SOFTWARE\Classes\Directory\shell\UnBlock", false);
                 baseKey.DeleteSubKeyTree(@"SOFTWARE\Classes\Directory\Background\shell\UnBlock", false);
                 baseKey.DeleteSubKeyTree(@"SOFTWARE\Classes\Drive\shell\UnBlock", false);
                 baseKey.DeleteSubKeyTree(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\UnBlock", false);
-            }
-        } catch { }
+                }
+            } catch { }
+        }
+    }
+
+    private static Microsoft.Win32.RegistryView[] GetRegistryViews() {
+        if (Environment.Is64BitOperatingSystem) return new Microsoft.Win32.RegistryView[] { Microsoft.Win32.RegistryView.Registry64, Microsoft.Win32.RegistryView.Registry32 };
+        return new Microsoft.Win32.RegistryView[] { Microsoft.Win32.RegistryView.Default };
     }
 
     private static void RestoreRegistryKeys(string exePath) {
-        try {
-            using (var baseKey = Microsoft.Win32.RegistryKey.OpenBaseKey(Microsoft.Win32.RegistryHive.LocalMachine, Microsoft.Win32.RegistryView.Registry64)) {
-                using (var k = baseKey.CreateSubKey(@"SOFTWARE\Classes\*\shell\UnBlock")) {
-                    k.SetValue("", "UnBlock");
-                    k.SetValue("Icon", "shell32.dll,239");
-                    using (var cmd = k.CreateSubKey("command")) { cmd.SetValue("", string.Format("\"{0}\" \"%1\"", exePath)); }
+        foreach (Microsoft.Win32.RegistryView view in GetRegistryViews()) {
+            try {
+                using (var baseKey = Microsoft.Win32.RegistryKey.OpenBaseKey(Microsoft.Win32.RegistryHive.LocalMachine, view)) {
+                    RestoreRegistryKey(baseKey, @"SOFTWARE\Classes\*\shell\UnBlock", "UnBlock", exePath, "%1");
+                    RestoreRegistryKey(baseKey, @"SOFTWARE\Classes\Directory\shell\UnBlock", "UnBlock", exePath, "%1");
+                    RestoreRegistryKey(baseKey, @"SOFTWARE\Classes\Directory\Background\shell\UnBlock", "UnBlock This Folder", exePath, "%V");
+                    RestoreRegistryKey(baseKey, @"SOFTWARE\Classes\Drive\shell\UnBlock", "UnBlock", exePath, "%1");
                 }
-                using (var k = baseKey.CreateSubKey(@"SOFTWARE\Classes\Directory\shell\UnBlock")) {
-                    k.SetValue("", "UnBlock");
-                    k.SetValue("Icon", "shell32.dll,239");
-                    using (var cmd = k.CreateSubKey("command")) { cmd.SetValue("", string.Format("\"{0}\" \"%1\"", exePath)); }
-                }
-                using (var k = baseKey.CreateSubKey(@"SOFTWARE\Classes\Directory\Background\shell\UnBlock")) {
-                    k.SetValue("", "UnBlock This Folder");
-                    k.SetValue("Icon", "shell32.dll,239");
-                    using (var cmd = k.CreateSubKey("command")) { cmd.SetValue("", string.Format("\"{0}\" \"%V\"", exePath)); }
-                }
-                using (var k = baseKey.CreateSubKey(@"SOFTWARE\Classes\Drive\shell\UnBlock")) {
-                    k.SetValue("", "UnBlock");
-                    k.SetValue("Icon", "shell32.dll,239");
-                    using (var cmd = k.CreateSubKey("command")) { cmd.SetValue("", string.Format("\"{0}\" \"%1\"", exePath)); }
-                }
-            }
-        } catch { }
+            } catch { }
+        }
+    }
+
+    private static void RestoreRegistryKey(Microsoft.Win32.RegistryKey baseKey, string path, string label, string exePath, string placeholder) {
+        using (var k = baseKey.CreateSubKey(path)) {
+            k.SetValue("", label);
+            k.SetValue("Icon", "shell32.dll,239");
+            k.SetValue("MultiSelectModel", "Player");
+            using (var cmd = k.CreateSubKey("command")) { cmd.SetValue("", string.Format("\"{0}\" \"{1}\"", exePath, placeholder)); }
+        }
     }
 }
 
@@ -872,6 +1105,7 @@ internal class UninstallWizardForm : Form {
     private readonly string localAppDataDir;
     private Button btnUninstall;
     private Button btnFinish;
+    private Panel wizardBottomBar;
     private ProgressBar progressBar;
     private Label lblStatus;
     private Panel contentPanel;
@@ -931,13 +1165,12 @@ internal class UninstallWizardForm : Form {
             Height = 54,
             BackColor = Color.FromArgb(241, 243, 245)
         };
+        wizardBottomBar = bottomBar;
         Panel topBorder = new Panel() { Dock = DockStyle.Top, Height = 1, BackColor = Color.FromArgb(222, 226, 230) };
         bottomBar.Controls.Add(topBorder);
 
         btnUninstall = new Button() {
             Text = "Uninstall Now",
-            Size = new Size(115, 32),
-            Location = new Point(265, 11),
             FlatStyle = FlatStyle.Flat,
             BackColor = Color.FromArgb(192, 57, 43),
             ForeColor = Color.White,
@@ -949,8 +1182,6 @@ internal class UninstallWizardForm : Form {
 
         btnFinish = new Button() {
             Text = "Cancel",
-            Size = new Size(85, 32),
-            Location = new Point(390, 11),
             FlatStyle = FlatStyle.Flat,
             BackColor = Color.FromArgb(225, 229, 233),
             ForeColor = Color.FromArgb(40, 40, 40),
@@ -960,8 +1191,9 @@ internal class UninstallWizardForm : Form {
         btnFinish.FlatAppearance.BorderSize = 0;
         btnFinish.Click += (s, e) => this.Close();
 
-        bottomBar.Controls.Add(btnUninstall);
-        bottomBar.Controls.Add(btnFinish);
+        // Sized from the label so the button text can never clip, including when it changes to
+        // "Close" after a successful uninstall.
+        UiLayout.LayoutButtonRow(bottomBar, 54, 11, 24, 8, new Button[] { btnUninstall, btnFinish });
 
         contentPanel = new Panel() {
             Dock = DockStyle.Fill,
@@ -1090,11 +1322,11 @@ internal class UninstallWizardForm : Form {
 
         btnUninstall.Visible = false;
         btnFinish.Text = "Close";
-        btnFinish.Size = new Size(95, 32);
-        btnFinish.Location = new Point(380, 11);
         btnFinish.BackColor = Color.FromArgb(39, 174, 96);
         btnFinish.ForeColor = Color.White;
         btnFinish.Font = new Font("Segoe UI", 9F, FontStyle.Bold);
+        // Re-run the label-driven layout now that the text changed to "Close".
+        UiLayout.LayoutButtonRow(wizardBottomBar, 54, 11, 24, 8, new Button[] { btnUninstall, btnFinish });
         btnFinish.Focus();
         this.AcceptButton = btnFinish;
     }
@@ -1102,7 +1334,7 @@ internal class UninstallWizardForm : Form {
 
 // Modern, ultra-fast Fluent File-in-Use Modal Dialog
 internal class IntegratedPromptForm : Form {
-    public enum UserChoice { None, KillAndDelete, UnlockAndDelete, Skip, Cancel }
+    public enum UserChoice { None, KillAndDelete, KillAndRename, KillAndMove, UnlockAndDelete, Skip, Cancel }
     public UserChoice SelectedChoice { get; private set; }
     public bool ApplyToAll { get; private set; }
 
@@ -1111,6 +1343,8 @@ internal class IntegratedPromptForm : Form {
     private PictureBox picProcessIcon;
     private Panel lockCard;
     private Button btnKill;
+    private Button btnRename;
+    private Button btnMove;
     private Button btnUnlock;
     private Button btnSkip;
     private Button btnCancel;
@@ -1134,16 +1368,37 @@ internal class IntegratedPromptForm : Form {
         this.MinimizeBox = false;
         this.ShowInTaskbar = false;
         this.StartPosition = FormStartPosition.CenterScreen;
-        this.ClientSize = new Size(550, 255);
+        this.ClientSize = new Size(600, 340);
         this.BackColor = Color.FromArgb(249, 250, 252);
         this.TopMost = true;
         this.Font = new Font("Segoe UI", 9F, FontStyle.Regular);
 
-        // --- Target File Icon ---
+        // Body region: a docked stack (header row, lock card, safety, checkbox) above the action
+        // bar. Every element is docked or table-positioned, so nothing can overlap.
+        Panel body = new Panel() {
+            Dock = DockStyle.Fill,
+            BackColor = Color.FromArgb(249, 250, 252),
+            Padding = new Padding(20, 16, 20, 12)
+        };
+
+        // --- Header row: icon | name+path | badge (table cells cannot overlap) ---
+        TableLayoutPanel headerRow = new TableLayoutPanel() {
+            Dock = DockStyle.Top,
+            Height = 56,
+            ColumnCount = 3,
+            RowCount = 1,
+            BackColor = body.BackColor,
+            Margin = new Padding(0)
+        };
+        headerRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 48F));
+        headerRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+        headerRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        headerRow.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
+
         picTargetIcon = new PictureBox() {
-            Location = new Point(20, 15),
-            Size = new Size(36, 36),
-            SizeMode = PictureBoxSizeMode.CenterImage
+            Dock = DockStyle.Fill,
+            SizeMode = PictureBoxSizeMode.CenterImage,
+            Margin = new Padding(0, 0, 8, 0)
         };
         try {
             if (File.Exists(targetPath)) picTargetIcon.Image = Icon.ExtractAssociatedIcon(targetPath).ToBitmap();
@@ -1152,20 +1407,37 @@ internal class IntegratedPromptForm : Form {
             picTargetIcon.Image = SystemIcons.Application.ToBitmap();
         }
 
+        Panel nameHost = new Panel() { Dock = DockStyle.Fill, BackColor = body.BackColor, Margin = new Padding(0, 2, 8, 0) };
         Label lblTargetName = new Label() {
             Text = fileName,
-            Location = new Point(66, 12),
-            Size = new Size(295, 22),
+            Dock = DockStyle.Top,
+            Height = 24,
             Font = new Font("Segoe UI", 11F, FontStyle.Bold),
             ForeColor = Color.FromArgb(24, 28, 32),
-            AutoEllipsis = true
+            AutoEllipsis = true,
+            TextAlign = ContentAlignment.MiddleLeft,
+            Margin = new Padding(0)
         };
+        Label lblTargetDir = new Label() {
+            Text = targetPath,
+            Dock = DockStyle.Fill,
+            Font = new Font("Segoe UI", 8.5F, FontStyle.Regular),
+            ForeColor = Color.FromArgb(108, 117, 125),
+            AutoEllipsis = true,
+            TextAlign = ContentAlignment.TopLeft,
+            Margin = new Padding(0)
+        };
+        nameHost.Controls.Add(lblTargetDir);
+        nameHost.Controls.Add(lblTargetName);
 
-        // --- Showing ... of ... files Pill Badge ---
+        // --- Showing ... of ... files Pill Badge (auto-sized, aligned right, never overlaps) ---
         Panel pnlBadge = new Panel() {
-            Location = new Point(370, 13),
-            Size = new Size(160, 22),
-            BackColor = Color.FromArgb(235, 243, 254)
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            BackColor = Color.FromArgb(235, 243, 254),
+            Margin = new Padding(8, 4, 0, 0),
+            Padding = new Padding(10, 3, 10, 3),
+            Anchor = AnchorStyles.Top | AnchorStyles.Right
         };
         pnlBadge.Paint += (s, pe) => {
             using (Pen p = new Pen(Color.FromArgb(186, 214, 250), 1)) {
@@ -1174,27 +1446,24 @@ internal class IntegratedPromptForm : Form {
         };
         Label lblCounter = new Label() {
             Text = totalCount > 1 ? string.Format("Showing {0} of {1} files", currentIndex, totalCount) : "Showing 1 of 1 file",
-            Dock = DockStyle.Fill,
+            AutoSize = true,
             Font = new Font("Segoe UI", 8.5F, FontStyle.Bold),
             ForeColor = Color.FromArgb(21, 101, 192),
             TextAlign = ContentAlignment.MiddleCenter
         };
         pnlBadge.Controls.Add(lblCounter);
 
-        Label lblTargetDir = new Label() {
-            Text = targetPath,
-            Location = new Point(67, 35),
-            Size = new Size(463, 16),
-            Font = new Font("Segoe UI", 8.5F, FontStyle.Regular),
-            ForeColor = Color.FromArgb(108, 117, 125),
-            AutoEllipsis = true
-        };
+        headerRow.Controls.Add(picTargetIcon, 0, 0);
+        headerRow.Controls.Add(nameHost, 1, 0);
+        headerRow.Controls.Add(pnlBadge, 2, 0);
 
-        // --- Lock Information Alert Card ---
+        // --- Lock Information Alert Card (docked below the header) ---
         lockCard = new Panel() {
-            Location = new Point(20, 58),
-            Size = new Size(510, 80),
-            BackColor = Color.White
+            Dock = DockStyle.Top,
+            Height = 92,
+            BackColor = Color.White,
+            Margin = new Padding(0),
+            Padding = new Padding(14, 10, 14, 10)
         };
         lockCard.Paint += (s, pe) => {
             using (Pen p = new Pen(Color.FromArgb(226, 230, 236), 1)) {
@@ -1203,80 +1472,143 @@ internal class IntegratedPromptForm : Form {
         };
 
         picProcessIcon = new PictureBox() {
-            Location = new Point(14, 14),
-            Size = new Size(26, 26),
+            Dock = DockStyle.Left,
+            Width = 34,
             SizeMode = PictureBoxSizeMode.CenterImage,
-            Image = SystemIcons.Information.ToBitmap()
+            Image = SystemIcons.Information.ToBitmap(),
+            Margin = new Padding(0)
         };
 
         Label lblLockHeader = new Label() {
             Text = "Active Lock Detected",
-            Location = new Point(48, 11),
-            Size = new Size(446, 18),
+            Dock = DockStyle.Top,
+            Height = 18,
             Font = new Font("Segoe UI", 8.8F, FontStyle.Bold),
-            ForeColor = Color.FromArgb(210, 45, 35)
+            ForeColor = Color.FromArgb(210, 45, 35),
+            AutoEllipsis = true
         };
 
         lblLockProcess = new Label() {
             Text = "Analyzing background locking processes...",
-            Location = new Point(48, 31),
-            Size = new Size(448, 42),
+            Dock = DockStyle.Fill,
             Font = new Font("Segoe UI", 8.5F, FontStyle.Regular),
             ForeColor = Color.FromArgb(55, 65, 75),
             AutoEllipsis = true
         };
 
+        Panel lockText = new Panel() { Dock = DockStyle.Fill, BackColor = Color.White, Padding = new Padding(6, 0, 0, 0) };
+        lockText.Controls.Add(lblLockProcess);
+        lockText.Controls.Add(lblLockHeader);
+        lockCard.Controls.Add(lockText);
         lockCard.Controls.Add(picProcessIcon);
-        lockCard.Controls.Add(lblLockHeader);
-        lockCard.Controls.Add(lblLockProcess);
 
-        // --- Checkbox: Do this to all current files ---
+        Panel lockCardHost = new Panel() { Dock = DockStyle.Top, Height = 104, BackColor = body.BackColor, Padding = new Padding(0, 12, 0, 0) };
+        lockCardHost.Controls.Add(lockCard);
+
+        Label lblSafety = new Label() {
+            Text = "Rename and move use the destination you choose. Killing an app can lose unsaved work.",
+            Dock = DockStyle.Top,
+            Height = 34,
+            Font = new Font("Segoe UI", 8.5F, FontStyle.Regular),
+            ForeColor = Color.FromArgb(75, 85, 99),
+            Padding = new Padding(0, 10, 0, 0)
+        };
+
         chkApplyAll = new CheckBox() {
-            Text = "Do this to all current files",
-            Location = new Point(22, 146),
-            Size = new Size(350, 22),
+            Text = "Apply this recycle action to remaining items",
+            Dock = DockStyle.Top,
+            Height = 26,
             Font = new Font("Segoe UI", 9F, FontStyle.Regular),
             ForeColor = Color.FromArgb(40, 45, 50),
-            Cursor = Cursors.Hand
+            Cursor = Cursors.Hand,
+            AutoEllipsis = false
         };
+
+        // Add in reverse dock order so they stack top-to-bottom: header, card, safety, checkbox.
+        body.Controls.Add(chkApplyAll);
+        body.Controls.Add(lblSafety);
+        body.Controls.Add(lockCardHost);
+        body.Controls.Add(headerRow);
 
         // --- Action Buttons Bar ---
         Panel bottomBar = new Panel() {
             Dock = DockStyle.Bottom,
-            Height = 52,
+            Height = 86,
             BackColor = Color.FromArgb(242, 244, 248)
         };
         Panel borderTop = new Panel() { Dock = DockStyle.Top, Height = 1, BackColor = Color.FromArgb(226, 230, 236) };
         bottomBar.Controls.Add(borderTop);
 
+        // One coherent palette for the modal, matching the main window: danger for destructive,
+        // the single accent for the safe file actions, neutral for the rest.
+        UiTheme modalTheme = UiTheme.Light;
+
         btnKill = new Button() {
-            Text = "Kill && Delete",
-            Size = new Size(120, 32),
-            Location = new Point(116, 10),
+            Text = "Kill && Recycle",
             FlatStyle = FlatStyle.Flat,
-            BackColor = Color.FromArgb(215, 45, 35),
+            BackColor = modalTheme.DangerFill,
             ForeColor = Color.White,
             Font = new Font("Segoe UI", 8.8F, FontStyle.Bold),
             Cursor = Cursors.Hand
         };
         btnKill.FlatAppearance.BorderSize = 0;
+        btnKill.FlatAppearance.MouseOverBackColor = modalTheme.DangerFillHover;
+        ConfigureFocus(btnKill);
+        btnKill.AccessibleName = "Kill locking processes and move this item to the Recycle Bin; if the drive has no Recycle Bin the item is left in place";
         btnKill.Click += (s, e) => {
             this.SelectedChoice = UserChoice.KillAndDelete;
             this.ApplyToAll = chkApplyAll.Checked;
             this.Close();
         };
 
-        btnUnlock = new Button() {
-            Text = "Unlock && Delete",
-            Size = new Size(132, 32),
-            Location = new Point(244, 10),
+        btnRename = new Button() {
+            Text = "Kill && Rename...",
             FlatStyle = FlatStyle.Flat,
-            BackColor = Color.FromArgb(32, 140, 75),
+            BackColor = modalTheme.AccentFill,
+            ForeColor = Color.White,
+            Font = new Font("Segoe UI", 8.8F, FontStyle.Bold),
+            Cursor = Cursors.Hand
+        };
+        btnRename.FlatAppearance.BorderSize = 0;
+        btnRename.FlatAppearance.MouseOverBackColor = modalTheme.AccentFillHover;
+        ConfigureFocus(btnRename);
+        btnRename.AccessibleName = "Kill locking processes and rename this item";
+        btnRename.Click += (s, e) => {
+            this.SelectedChoice = UserChoice.KillAndRename;
+            this.ApplyToAll = false;
+            this.Close();
+        };
+
+        btnMove = new Button() {
+            Text = "Kill && Move...",
+            FlatStyle = FlatStyle.Flat,
+            BackColor = modalTheme.AccentFill,
+            ForeColor = Color.White,
+            Font = new Font("Segoe UI", 8.8F, FontStyle.Bold),
+            Cursor = Cursors.Hand
+        };
+        btnMove.FlatAppearance.BorderSize = 0;
+        btnMove.FlatAppearance.MouseOverBackColor = modalTheme.AccentFillHover;
+        ConfigureFocus(btnMove);
+        btnMove.AccessibleName = "Kill locking processes and move this item";
+        btnMove.Click += (s, e) => {
+            this.SelectedChoice = UserChoice.KillAndMove;
+            this.ApplyToAll = false;
+            this.Close();
+        };
+
+        btnUnlock = new Button() {
+            Text = "Unlock && Recycle",
+            FlatStyle = FlatStyle.Flat,
+            BackColor = modalTheme.SuccessFill,
             ForeColor = Color.White,
             Font = new Font("Segoe UI", 8.8F, FontStyle.Bold),
             Cursor = Cursors.Hand
         };
         btnUnlock.FlatAppearance.BorderSize = 0;
+        btnUnlock.FlatAppearance.MouseOverBackColor = modalTheme.SuccessFillHover;
+        ConfigureFocus(btnUnlock);
+        btnUnlock.AccessibleName = "Close compatible file handles and move this item to the Recycle Bin; if the drive has no Recycle Bin the item is left in place";
         btnUnlock.Click += (s, e) => {
             this.SelectedChoice = UserChoice.UnlockAndDelete;
             this.ApplyToAll = chkApplyAll.Checked;
@@ -1285,8 +1617,6 @@ internal class IntegratedPromptForm : Form {
 
         btnSkip = new Button() {
             Text = "Skip",
-            Size = new Size(72, 32),
-            Location = new Point(384, 10),
             FlatStyle = FlatStyle.Flat,
             BackColor = Color.FromArgb(226, 230, 236),
             ForeColor = Color.FromArgb(40, 45, 50),
@@ -1294,6 +1624,7 @@ internal class IntegratedPromptForm : Form {
             Cursor = Cursors.Hand
         };
         btnSkip.FlatAppearance.BorderSize = 0;
+        ConfigureFocus(btnSkip);
         btnSkip.Click += (s, e) => {
             this.SelectedChoice = UserChoice.Skip;
             this.ApplyToAll = chkApplyAll.Checked;
@@ -1302,8 +1633,6 @@ internal class IntegratedPromptForm : Form {
 
         btnCancel = new Button() {
             Text = "Cancel",
-            Size = new Size(72, 32),
-            Location = new Point(462, 10),
             FlatStyle = FlatStyle.Flat,
             BackColor = Color.FromArgb(226, 230, 236),
             ForeColor = Color.FromArgb(40, 45, 50),
@@ -1311,26 +1640,22 @@ internal class IntegratedPromptForm : Form {
             Cursor = Cursors.Hand
         };
         btnCancel.FlatAppearance.BorderSize = 0;
+        ConfigureFocus(btnCancel);
         btnCancel.Click += (s, e) => {
             this.SelectedChoice = UserChoice.Cancel;
             this.ApplyToAll = chkApplyAll.Checked;
             this.Close();
         };
 
-        bottomBar.Controls.Add(btnKill);
-        bottomBar.Controls.Add(btnUnlock);
-        bottomBar.Controls.Add(btnSkip);
-        bottomBar.Controls.Add(btnCancel);
+        // Size and place every action button from its own label so none can clip; the row wraps
+        // to a second line if the dialog is ever too narrow for one line.
+        UiLayout.LayoutButtonRow(bottomBar, 74, 12, 20, 8, new Button[] { btnKill, btnRename, btnMove, btnUnlock, btnSkip, btnCancel });
 
-        this.Controls.Add(picTargetIcon);
-        this.Controls.Add(lblTargetName);
-        this.Controls.Add(pnlBadge);
-        this.Controls.Add(lblTargetDir);
-        this.Controls.Add(lockCard);
-        this.Controls.Add(chkApplyAll);
+        // Body fills the space above the action bar; both are docked so they cannot overlap.
+        this.Controls.Add(body);
         this.Controls.Add(bottomBar);
         this.CancelButton = btnCancel;
-        this.AcceptButton = btnKill;
+        this.AcceptButton = btnSkip;
     }
 
     protected override void OnShown(EventArgs e) {
@@ -1365,5 +1690,363 @@ internal class IntegratedPromptForm : Form {
                 }
             }));
         } catch { }
+    }
+
+    private static void ConfigureFocus(Button button) {
+        button.GotFocus += (s, e) => {
+            button.FlatAppearance.BorderSize = 2;
+            button.FlatAppearance.BorderColor = Color.Black;
+        };
+        button.LostFocus += (s, e) => { button.FlatAppearance.BorderSize = 0; };
+    }
+}
+
+internal enum FileInUseActionReviewOutcome { None, Confirmed, Back, Cancelled }
+
+internal sealed class FileInUseActionReviewForm : Form {
+    private readonly string targetPath;
+    private readonly IntegratedPromptForm.UserChoice action;
+    private TextBox input;
+    private Label validationMessage;
+    private Button confirmButton;
+
+    public FileInUseActionReviewOutcome Outcome { get; private set; }
+    public string RequestedNewName { get; private set; }
+    public string RequestedDestination { get; private set; }
+
+    public FileInUseActionReviewForm(string targetPath, IntegratedPromptForm.UserChoice action, List<ProcessItem> lockers, string initialNewName, string initialDestination, string refreshNotice) {
+        this.targetPath = targetPath;
+        this.action = action;
+        this.Outcome = FileInUseActionReviewOutcome.None;
+
+        string actionTitle = GetActionTitle(action);
+        string fileName = Path.GetFileName(targetPath);
+        if (string.IsNullOrEmpty(fileName)) fileName = targetPath;
+
+        Text = actionTitle + " | File in Use | UnBlock";
+        FormBorderStyle = FormBorderStyle.FixedDialog;
+        MaximizeBox = false;
+        MinimizeBox = false;
+        ShowInTaskbar = false;
+        StartPosition = FormStartPosition.CenterScreen;
+        ClientSize = new Size(620, 470);
+        BackColor = Color.FromArgb(249, 250, 252);
+        TopMost = true;
+        Font = new Font("Segoe UI", 9F, FontStyle.Regular);
+
+        // Everything stacks with docking in a padded body, so rows compute their own positions
+        // and can never overlap regardless of DPI, notice text, or target length.
+        Panel body = new Panel {
+            Dock = DockStyle.Fill,
+            BackColor = Color.FromArgb(249, 250, 252),
+            Padding = new Padding(22, 18, 22, 12)
+        };
+
+        Label title = new Label {
+            Text = actionTitle,
+            Dock = DockStyle.Top,
+            Height = 26,
+            Font = new Font("Segoe UI", 12F, FontStyle.Bold),
+            ForeColor = Color.FromArgb(24, 28, 32),
+            AutoEllipsis = true
+        };
+        Label target = new Label {
+            Text = fileName,
+            Dock = DockStyle.Top,
+            Height = 20,
+            Font = new Font("Segoe UI", 9.5F, FontStyle.Bold),
+            ForeColor = Color.FromArgb(42, 48, 55),
+            AutoEllipsis = true
+        };
+        Label path = new Label {
+            Text = targetPath,
+            Dock = DockStyle.Top,
+            Height = 18,
+            Font = new Font("Segoe UI", 8.5F),
+            ForeColor = Color.FromArgb(87, 96, 106),
+            AutoEllipsis = true
+        };
+
+        Panel titleBlock = new Panel { Dock = DockStyle.Top, Height = 70, BackColor = body.BackColor };
+        titleBlock.Controls.Add(path);
+        titleBlock.Controls.Add(target);
+        titleBlock.Controls.Add(title);
+
+        Panel lockCard = new Panel {
+            Dock = DockStyle.Top,
+            Height = 112,
+            BackColor = Color.White,
+            Padding = new Padding(14, 12, 14, 12)
+        };
+        lockCard.Paint += (s, e) => {
+            using (Pen pen = new Pen(Color.FromArgb(210, 216, 224))) {
+                e.Graphics.DrawRectangle(pen, 0, 0, lockCard.Width - 1, lockCard.Height - 1);
+            }
+        };
+        Label lockHeading = new Label {
+            Text = lockers != null && lockers.Count > 0 ? "Processes that will be closed" : "No active locker detected",
+            Dock = DockStyle.Top,
+            Height = 18,
+            Font = new Font("Segoe UI", 9F, FontStyle.Bold),
+            ForeColor = lockers != null && lockers.Count > 0 ? Color.FromArgb(183, 58, 47) : Color.FromArgb(41, 128, 85),
+            AutoEllipsis = true
+        };
+        Label lockDetails = new Label {
+            Text = BuildLockDetails(lockers),
+            Dock = DockStyle.Fill,
+            Font = new Font("Segoe UI", 8.5F),
+            ForeColor = Color.FromArgb(55, 65, 75),
+            AutoEllipsis = true
+        };
+        lockCard.Controls.Add(lockDetails);
+        lockCard.Controls.Add(lockHeading);
+
+        Panel lockCardHost = new Panel { Dock = DockStyle.Top, Height = 124, BackColor = body.BackColor, Padding = new Padding(0, 12, 0, 0) };
+        lockCardHost.Controls.Add(lockCard);
+
+        // Optional refresh notice sits in its own docked row, so it pushes the input down rather
+        // than colliding with it.
+        Panel noticeHost = new Panel { Dock = DockStyle.Top, Height = 0, BackColor = body.BackColor };
+        if (!string.IsNullOrEmpty(refreshNotice)) {
+            Label refreshed = new Label {
+                Text = refreshNotice,
+                Dock = DockStyle.Fill,
+                Font = new Font("Segoe UI", 8.5F, FontStyle.Bold),
+                ForeColor = Color.FromArgb(155, 89, 24)
+            };
+            noticeHost.Padding = new Padding(0, 8, 0, 4);
+            noticeHost.Height = 48;
+            noticeHost.Controls.Add(refreshed);
+        }
+
+        // Input area: label + field (and Browse for move), all docked so they cannot overlap.
+        Panel inputHost = new Panel { Dock = DockStyle.Top, Height = 0, BackColor = body.BackColor };
+        if (action == IntegratedPromptForm.UserChoice.KillAndRename) {
+            Label inputLabel = new Label {
+                Text = "New name",
+                Dock = DockStyle.Top,
+                Height = 18,
+                Font = new Font("Segoe UI", 8.5F, FontStyle.Bold),
+                ForeColor = Color.FromArgb(42, 48, 55)
+            };
+            input = new TextBox {
+                Text = string.IsNullOrEmpty(initialNewName) ? fileName : initialNewName,
+                Dock = DockStyle.Top,
+                Font = new Font("Segoe UI", 9F),
+                AccessibleName = "New file or folder name"
+            };
+            input.TextChanged += (s, e) => ValidateInput();
+            Panel field = new Panel { Dock = DockStyle.Top, Height = 30, BackColor = body.BackColor, Padding = new Padding(0, 4, 0, 0) };
+            field.Controls.Add(input);
+            inputHost.Controls.Add(field);
+            inputHost.Controls.Add(inputLabel);
+            inputHost.Height = 52;
+        } else if (action == IntegratedPromptForm.UserChoice.KillAndMove) {
+            Label inputLabel = new Label {
+                Text = "Destination folder",
+                Dock = DockStyle.Top,
+                Height = 18,
+                Font = new Font("Segoe UI", 8.5F, FontStyle.Bold),
+                ForeColor = Color.FromArgb(42, 48, 55)
+            };
+            input = new TextBox {
+                Text = initialDestination ?? "",
+                Dock = DockStyle.Fill,
+                ReadOnly = true,
+                Font = new Font("Segoe UI", 9F),
+                AccessibleName = "Selected destination folder"
+            };
+            Button browse = new Button {
+                Text = "Browse...",
+                Dock = DockStyle.Right,
+                Width = 96,
+                FlatStyle = FlatStyle.Flat,
+                BackColor = Color.FromArgb(226, 230, 236),
+                ForeColor = Color.FromArgb(40, 45, 50),
+                Cursor = Cursors.Hand,
+                AccessibleName = "Choose destination folder"
+            };
+            browse.FlatAppearance.BorderSize = 0;
+            UiLayout.EnforceNoClip(browse);
+            ConfigureFocus(browse);
+            browse.Click += (s, e) => {
+                using (FolderBrowserDialog dialog = new FolderBrowserDialog()) {
+                    dialog.Description = "Choose where UnBlock should move this item after closing its lock.";
+                    if (!string.IsNullOrEmpty(input.Text) && Directory.Exists(input.Text)) dialog.SelectedPath = input.Text;
+                    if (dialog.ShowDialog(this) == DialogResult.OK) input.Text = dialog.SelectedPath;
+                }
+            };
+            Panel field = new Panel { Dock = DockStyle.Top, Height = 32, BackColor = body.BackColor, Padding = new Padding(0, 4, 0, 5) };
+            Panel inputPad = new Panel { Dock = DockStyle.Fill, BackColor = body.BackColor, Padding = new Padding(0, 0, 8, 0) };
+            inputPad.Controls.Add(input);
+            field.Controls.Add(inputPad);
+            field.Controls.Add(browse);
+            inputHost.Controls.Add(field);
+            inputHost.Controls.Add(inputLabel);
+            inputHost.Height = 54;
+        }
+
+        validationMessage = new Label {
+            Dock = DockStyle.Top,
+            Height = 26,
+            Font = new Font("Segoe UI", 8.5F),
+            ForeColor = Color.FromArgb(183, 58, 47),
+            TextAlign = ContentAlignment.MiddleLeft
+        };
+        Panel validationHost = new Panel { Dock = DockStyle.Top, Height = 26, BackColor = body.BackColor };
+        validationHost.Controls.Add(validationMessage);
+
+        Label warning = new Label {
+            Text = lockers != null && lockers.Count > 0 ? "Closing an application can lose unsaved work. Only the processes listed above will be closed." : "No process will be closed unless a fresh scan finds a locker.",
+            Dock = DockStyle.Top,
+            Height = 36,
+            Font = new Font("Segoe UI", 8.5F),
+            ForeColor = Color.FromArgb(75, 85, 99),
+            Padding = new Padding(0, 4, 0, 0)
+        };
+
+        // Reverse dock order: bottom-most added first so the stack reads top-to-bottom.
+        body.Controls.Add(warning);
+        body.Controls.Add(validationHost);
+        body.Controls.Add(inputHost);
+        body.Controls.Add(noticeHost);
+        body.Controls.Add(lockCardHost);
+        body.Controls.Add(titleBlock);
+
+        Panel bottomBar = new Panel {
+            Dock = DockStyle.Bottom,
+            Height = 54,
+            BackColor = Color.FromArgb(242, 244, 248)
+        };
+        Panel divider = new Panel { Dock = DockStyle.Top, Height = 1, BackColor = Color.FromArgb(210, 216, 224) };
+        bottomBar.Controls.Add(divider);
+        Button back = new Button {
+            Text = "Back",
+            FlatStyle = FlatStyle.Flat,
+            BackColor = Color.FromArgb(226, 230, 236),
+            ForeColor = Color.FromArgb(40, 45, 50),
+            Cursor = Cursors.Hand,
+            AccessibleName = "Return to file action choices"
+        };
+        back.FlatAppearance.BorderSize = 0;
+        ConfigureFocus(back);
+        back.Click += (s, e) => { Outcome = FileInUseActionReviewOutcome.Back; Close(); };
+        Button cancel = new Button {
+            Text = "Cancel",
+            FlatStyle = FlatStyle.Flat,
+            BackColor = Color.FromArgb(226, 230, 236),
+            ForeColor = Color.FromArgb(40, 45, 50),
+            Cursor = Cursors.Hand,
+            AccessibleName = "Cancel and return to the Explorer dialog"
+        };
+        cancel.FlatAppearance.BorderSize = 0;
+        ConfigureFocus(cancel);
+        cancel.Click += (s, e) => { Outcome = FileInUseActionReviewOutcome.Cancelled; Close(); };
+        confirmButton = new Button {
+            Text = actionTitle,
+            FlatStyle = FlatStyle.Flat,
+            BackColor = UiTheme.Light.DangerFill,
+            ForeColor = Color.White,
+            Font = new Font("Segoe UI", 8.5F, FontStyle.Bold),
+            Cursor = Cursors.Hand,
+            AccessibleName = actionTitle
+        };
+        confirmButton.FlatAppearance.MouseOverBackColor = UiTheme.Light.DangerFillHover;
+        confirmButton.FlatAppearance.BorderSize = 0;
+        ConfigureFocus(confirmButton);
+        confirmButton.Click += (s, e) => {
+            if (!ValidateInput()) return;
+            RequestedNewName = action == IntegratedPromptForm.UserChoice.KillAndRename ? input.Text.Trim() : null;
+            RequestedDestination = action == IntegratedPromptForm.UserChoice.KillAndMove ? input.Text.Trim() : null;
+            Outcome = FileInUseActionReviewOutcome.Confirmed;
+            Close();
+        };
+        // Sized from the label so the confirm button can never clip its action name.
+        UiLayout.LayoutButtonRow(bottomBar, 54, 11, 22, 8, new Button[] { back, cancel, confirmButton });
+
+        // Body fills above the action bar; both are docked so they cannot overlap.
+        Controls.Add(body);
+        Controls.Add(bottomBar);
+        CancelButton = cancel;
+        AcceptButton = confirmButton;
+        ValidateInput();
+    }
+
+    protected override void OnShown(EventArgs e) {
+        base.OnShown(e);
+        Activate();
+        BringToFront();
+        Uninstaller.SetForegroundWindow(Handle);
+        if (input != null && action == IntegratedPromptForm.UserChoice.KillAndRename) {
+            input.SelectAll();
+            input.Focus();
+        } else if (input != null && action == IntegratedPromptForm.UserChoice.KillAndMove) {
+            input.Focus();
+        }
+    }
+
+    protected override void OnFormClosing(FormClosingEventArgs e) {
+        if (Outcome == FileInUseActionReviewOutcome.None) Outcome = FileInUseActionReviewOutcome.Cancelled;
+        base.OnFormClosing(e);
+    }
+
+    private bool ValidateInput() {
+        FileOperationRequest operation = new FileOperationRequest { SourcePath = targetPath };
+        if (action == IntegratedPromptForm.UserChoice.KillAndRename) {
+            operation.Kind = FileOperationKind.Rename;
+            operation.DestinationPath = input == null ? null : input.Text.Trim();
+        } else if (action == IntegratedPromptForm.UserChoice.KillAndMove) {
+            operation.Kind = FileOperationKind.Move;
+            operation.DestinationPath = input == null ? null : input.Text.Trim();
+            if (string.IsNullOrEmpty(operation.DestinationPath) || !Directory.Exists(operation.DestinationPath)) {
+                ShowValidation("Choose a destination folder that exists.");
+                return false;
+            }
+        } else {
+            operation.Kind = FileOperationKind.Delete;
+            operation.DeleteMode = DeleteMode.RecycleBin;
+        }
+
+        FileOperationResult validation = FileOperations.Validate(operation);
+        if (!validation.Success) {
+            ShowValidation(validation.ErrorMessage);
+            return false;
+        }
+        ShowValidation(null);
+        return true;
+    }
+
+    private void ShowValidation(string message) {
+        if (validationMessage != null) validationMessage.Text = message ?? "";
+        if (confirmButton != null) confirmButton.Enabled = string.IsNullOrEmpty(message);
+    }
+
+    private static string GetActionTitle(IntegratedPromptForm.UserChoice choice) {
+        if (choice == IntegratedPromptForm.UserChoice.KillAndRename) return "Kill & Rename";
+        if (choice == IntegratedPromptForm.UserChoice.KillAndMove) return "Kill & Move";
+        return "Kill & Recycle";
+    }
+
+    private static string BuildLockDetails(List<ProcessItem> lockers) {
+        if (lockers == null || lockers.Count == 0) return "UnBlock will refresh the scan before continuing. No unrelated process will be closed.";
+        StringBuilder text = new StringBuilder();
+        int shown = Math.Min(lockers.Count, 2);
+        for (int i = 0; i < shown; i++) {
+            ProcessItem item = lockers[i];
+            if (item == null) continue;
+            if (text.Length > 0) text.AppendLine();
+            text.Append(item.Name ?? "Unknown process").Append(" (PID ").Append(item.Pid).Append(")");
+            if (!string.IsNullOrEmpty(item.Path)) text.AppendLine().Append("  ").Append(item.Path);
+        }
+        if (lockers.Count > shown) text.AppendLine().Append("and ").Append(lockers.Count - shown).Append(" more process(es).");
+        return text.ToString();
+    }
+
+    private static void ConfigureFocus(Button button) {
+        button.GotFocus += (s, e) => {
+            button.FlatAppearance.BorderSize = 2;
+            button.FlatAppearance.BorderColor = Color.Black;
+        };
+        button.LostFocus += (s, e) => { button.FlatAppearance.BorderSize = 0; };
     }
 }

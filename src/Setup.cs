@@ -297,6 +297,9 @@ internal static class Setup {
             options.ReferencedAssemblies.Add("System.Core.dll");
             options.ReferencedAssemblies.Add("System.Drawing.dll");
             options.ReferencedAssemblies.Add("System.Windows.Forms.dll");
+            options.ReferencedAssemblies.Add("System.Management.dll");
+            options.ReferencedAssemblies.Add("System.Runtime.Serialization.dll");
+            options.ReferencedAssemblies.Add("System.Xml.dll");
 
             CompilerResults results = provider.CompileAssemblyFromFile(options, sources.ToArray());
             if (results.Errors.HasErrors) {
@@ -314,16 +317,21 @@ internal static class Setup {
     }
 
     private static void RegisterContextMenu(string exePath) {
-        CreateVerb(@"SOFTWARE\Classes\*\shell\UnBlock", "UnBlock", exePath, "%1");
-        CreateVerb(@"SOFTWARE\Classes\Directory\shell\UnBlock", "UnBlock", exePath, "%1");
-        CreateVerb(@"SOFTWARE\Classes\Directory\Background\shell\UnBlock", "UnBlock This Folder", exePath, "%V");
-        CreateVerb(@"SOFTWARE\Classes\Drive\shell\UnBlock", "UnBlock", exePath, "%1");
+        foreach (Microsoft.Win32.RegistryView view in GetRegistryViews()) {
+            using (Microsoft.Win32.RegistryKey baseKey = Microsoft.Win32.RegistryKey.OpenBaseKey(Microsoft.Win32.RegistryHive.LocalMachine, view)) {
+                CreateVerb(baseKey, @"SOFTWARE\Classes\*\shell\UnBlock", "UnBlock", exePath, "%1");
+                CreateVerb(baseKey, @"SOFTWARE\Classes\Directory\shell\UnBlock", "UnBlock", exePath, "%1");
+                CreateVerb(baseKey, @"SOFTWARE\Classes\Directory\Background\shell\UnBlock", "UnBlock This Folder", exePath, "%V");
+                CreateVerb(baseKey, @"SOFTWARE\Classes\Drive\shell\UnBlock", "UnBlock", exePath, "%1");
+            }
+        }
     }
 
-    private static void CreateVerb(string path, string label, string exePath, string argPlaceholder) {
-        using (Microsoft.Win32.RegistryKey k = Microsoft.Win32.Registry.LocalMachine.CreateSubKey(path)) {
+    private static void CreateVerb(Microsoft.Win32.RegistryKey baseKey, string path, string label, string exePath, string argPlaceholder) {
+        using (Microsoft.Win32.RegistryKey k = baseKey.CreateSubKey(path)) {
             k.SetValue("", label);
             k.SetValue("Icon", "shell32.dll,239");
+            k.SetValue("MultiSelectModel", "Player");
             using (Microsoft.Win32.RegistryKey cmd = k.CreateSubKey("command")) {
                 cmd.SetValue("", "\"" + exePath + "\" \"" + argPlaceholder + "\"");
             }
@@ -331,17 +339,25 @@ internal static class Setup {
     }
 
     private static void RegisterArpEntry(string installDir, string exePath, string uninstallExePath) {
-        using (Microsoft.Win32.RegistryKey k = Microsoft.Win32.Registry.LocalMachine.CreateSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\UnBlock")) {
-            k.SetValue("DisplayName", "UnBlock File & Folder Unlocker");
-            k.SetValue("DisplayVersion", "2.1.0");
-            k.SetValue("Publisher", "UnBlock");
-            k.SetValue("UninstallString", "\"" + uninstallExePath + "\"");
-            k.SetValue("QuietUninstallString", "\"" + uninstallExePath + "\" /SILENT");
-            k.SetValue("InstallLocation", "\"" + installDir + "\"");
-            k.SetValue("DisplayIcon", "\"" + exePath + "\"");
-            k.SetValue("NoModify", 1, Microsoft.Win32.RegistryValueKind.DWord);
-            k.SetValue("NoRepair", 1, Microsoft.Win32.RegistryValueKind.DWord);
+        foreach (Microsoft.Win32.RegistryView view in GetRegistryViews()) {
+            using (Microsoft.Win32.RegistryKey baseKey = Microsoft.Win32.RegistryKey.OpenBaseKey(Microsoft.Win32.RegistryHive.LocalMachine, view))
+            using (Microsoft.Win32.RegistryKey k = baseKey.CreateSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\UnBlock")) {
+                k.SetValue("DisplayName", "UnBlock File & Folder Unlocker");
+                    k.SetValue("DisplayVersion", "2.3.1");
+                k.SetValue("Publisher", "UnBlock");
+                k.SetValue("UninstallString", "\"" + uninstallExePath + "\"");
+                k.SetValue("QuietUninstallString", "\"" + uninstallExePath + "\" /SILENT");
+                k.SetValue("InstallLocation", "\"" + installDir + "\"");
+                k.SetValue("DisplayIcon", "\"" + exePath + "\"");
+                k.SetValue("NoModify", 1, Microsoft.Win32.RegistryValueKind.DWord);
+                k.SetValue("NoRepair", 1, Microsoft.Win32.RegistryValueKind.DWord);
+            }
         }
+    }
+
+    private static Microsoft.Win32.RegistryView[] GetRegistryViews() {
+        if (Environment.Is64BitOperatingSystem) return new Microsoft.Win32.RegistryView[] { Microsoft.Win32.RegistryView.Registry64, Microsoft.Win32.RegistryView.Registry32 };
+        return new Microsoft.Win32.RegistryView[] { Microsoft.Win32.RegistryView.Default };
     }
 
     private static void DeployWatcher(string exePath, string installDir) {

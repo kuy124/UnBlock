@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
+using System.Threading;
 
 public enum Severity {
     Low,      // Benign / Green
@@ -89,8 +90,83 @@ public class ProcessItem {
     public bool IsDir { get; set; }
     public List<IntPtr> Handles { get; set; }
     public bool IsModuleLock { get; set; }
+    public int ParentPid { get; set; }
+    public ProcessDetails Details { get; set; }
+    public List<LockMatch> Matches { get; set; }
 
     public ProcessItem() {
         Handles = new List<IntPtr>();
+        Matches = new List<LockMatch>();
+    }
+}
+
+public enum LockSource {
+    Handle,
+    Module
+}
+
+public enum ScanStatus {
+    Completed,
+    Partial,
+    Cancelled,
+    TimedOut,
+    Failed
+}
+
+public class LockMatch {
+    public string TargetPath { get; set; }
+    public string LockedPath { get; set; }
+    public uint GrantedAccess { get; set; }
+    public string AccessDescription { get; set; }
+    public Severity Severity { get; set; }
+    public LockSource Source { get; set; }
+    public bool CanUnlock { get; set; }
+}
+
+public class ProcessDetails {
+    public int Pid { get; set; }
+    public string Name { get; set; }
+    public string ExecutablePath { get; set; }
+    public string Account { get; set; }
+    public int ParentPid { get; set; }
+    public bool IsWow64 { get; set; }
+    public string CommandLine { get; set; }
+    public DateTime? StartTimeUtc { get; set; }
+    public string Availability { get; set; }
+}
+
+public class ScanRequest {
+    public HashSet<string> Targets { get; private set; }
+    public bool ForceRefresh { get; set; }
+    public bool IncludeModules { get; set; }
+    public TimeSpan Deadline { get; set; }
+    public CancellationToken CancellationToken { get; set; }
+
+    public ScanRequest(IEnumerable<string> targets) {
+        Targets = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (targets != null) {
+            foreach (string target in targets) {
+                if (!string.IsNullOrEmpty(target)) Targets.Add(target);
+            }
+        }
+        ForceRefresh = false;
+        IncludeModules = true;
+        Deadline = TimeSpan.FromSeconds(30);
+        CancellationToken = CancellationToken.None;
+    }
+}
+
+public class ScanResult {
+    public List<ProcessItem> Processes { get; set; }
+    public ScanStatus Status { get; set; }
+    public string ErrorMessage { get; set; }
+    public DateTime StartedUtc { get; set; }
+    public DateTime FinishedUtc { get; set; }
+    public int ProcessCount { get { return Processes == null ? 0 : Processes.Count; } }
+
+    public ScanResult() {
+        Processes = new List<ProcessItem>();
+        Status = ScanStatus.Completed;
+        StartedUtc = DateTime.UtcNow;
     }
 }

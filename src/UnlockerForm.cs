@@ -18,33 +18,64 @@ public partial class UnlockerForm : Form {
     private ListView listView;
     private ImageList imageList;
     private Button btnUnlock;
-    private Button btnUnlockAll;
     private Button btnKill;
-    private Button btnKillAll;
-    private Button btnForceDelete;
+    private Button btnKillRecycle;
+    private Button btnKillRename;
+    private Button btnKillMove;
+    private Button btnKillCopy;
+    private Button btnReload;
+    private Button btnMore;
+    private ContextMenuStrip moreMenu;
+    private ToolStripMenuItem miUnlockAll;
+    private ToolStripMenuItem miKillAll;
+    private ToolStripMenuItem miKillPermanent;
+    private ToolStripMenuItem miKillRestart;
+    private ToolStripMenuItem miRepairPermissions;
+    private ToolStripMenuItem miCancelScan;
+    private ToolStripMenuItem miCancelAction;
+    private ToolStripMenuItem miClearTargets;
     private Button btnElevate;
     private Button btnClose;
     private Button btnAddFile;
     private Button btnAddFolder;
+    private Button btnThemeToggle;
     private Label lblTarget;
     private Label lblAdminState;
     private Label lblStatus;
+    private Label lblAppTitle;
     private TextBox txtFilter;
     private ProgressBar progressBar;
     private ToolTip toolTip;
+    private Panel headerPanel;
+    private FlowLayoutPanel headerButtons;
+    private Panel toolbarBorder;
+    private Panel actionBarBorder;
+    private Panel actionBar;
+    private FlowLayoutPanel actionStrip;
+    private Panel actionStripHost;
+    private Panel closeHost;
+    private UiTheme theme;
     
     private bool isAdmin;
     private string logFile;
     private static ushort CachedFileTypeIndex = 0;
+    private static readonly object fileTypeIndexLock = new object();
     private System.Windows.Forms.Timer ipcTimer;
     
     private bool isInitializing = true;
     private bool isScanning = false;
     private bool rescanPending = false;
+    private bool isActionRunning = false;
+    private CancellationTokenSource scanCancellation;
+    private CancellationTokenSource operationCancellation;
+    private ScanResult lastScanResult;
+    private string pendingActionId;
+    private FileActionRequest pendingElevationRequest;
     private readonly object ipcLock = new object();
     private readonly object scanLock = new object();
     private static readonly Dictionary<int, string> ProcessPathMap = new Dictionary<int, string>();
     private static readonly Dictionary<int, string> ProcessNameMap = new Dictionary<int, string>();
+    private static readonly Dictionary<int, int> ProcessParentMap = new Dictionary<int, int>();
     private static DateTime lastSnapshotTime = DateTime.MinValue;
     private static readonly TimeSpan CacheTtl = TimeSpan.FromSeconds(8);
     private static readonly object CacheLock = new object();
@@ -73,6 +104,8 @@ public partial class UnlockerForm : Form {
         Directory.CreateDirectory(logDir);
         logFile = Path.Combine(logDir, "UnBlock.log");
 
+        theme = UiTheme.For(LoadThemePreference());
+
         Log("======================================");
         Log("UnBlock Started (Turbo Multi-Target Mode)");
         Log("Running as Administrator: " + isAdmin);
@@ -85,6 +118,40 @@ public partial class UnlockerForm : Form {
 
         UpdateTargetLabel();
         StartAsyncScan(false); 
+    }
+
+    private static UiTheme.Mode LoadThemePreference() {
+        try {
+            using (Microsoft.Win32.RegistryKey key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(@"Software\UnBlock")) {
+                string saved = key == null ? null : key.GetValue("UiTheme") as string;
+                if (string.Equals(saved, "dark", StringComparison.OrdinalIgnoreCase)) return UiTheme.Mode.Dark;
+                if (string.Equals(saved, "light", StringComparison.OrdinalIgnoreCase)) return UiTheme.Mode.Light;
+            }
+        } catch { }
+
+        // No saved choice: follow the Windows app theme so the tool matches the desktop.
+        try {
+            using (Microsoft.Win32.RegistryKey key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(
+                @"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize")) {
+                object appsUseLight = key == null ? null : key.GetValue("AppsUseLightTheme");
+                if (appsUseLight is int && (int)appsUseLight == 0) return UiTheme.Mode.Dark;
+            }
+        } catch { }
+        return UiTheme.Mode.Light;
+    }
+
+    private void SaveThemePreference(UiTheme.Mode mode) {
+        try {
+            using (Microsoft.Win32.RegistryKey key = Microsoft.Win32.Registry.CurrentUser.CreateSubKey(@"Software\UnBlock")) {
+                if (key != null) key.SetValue("UiTheme", mode == UiTheme.Mode.Dark ? "dark" : "light");
+            }
+        } catch { }
+    }
+
+    private void BtnThemeToggle_Click(object sender, EventArgs e) {
+        UiTheme.Mode next = theme.IsDark ? UiTheme.Mode.Light : UiTheme.Mode.Dark;
+        ApplyTheme(UiTheme.For(next));
+        SaveThemePreference(next);
     }
 
     private static void EnableDebugPrivilege() {
@@ -110,17 +177,30 @@ public partial class UnlockerForm : Form {
 
     private void UpdateButtonStates() {
         bool scanning;
-        lock (scanLock) { scanning = isScanning; }
+        bool actionRunning;
+        lock (scanLock) { scanning = isScanning; actionRunning = isActionRunning; }
 
         bool hasSelection = listView.SelectedItems.Count > 0 && listView.SelectedItems[0].Tag is ProcessItem;
-        bool hasItems = currentScanResults.Count > 0 && !scanning;
-        hasSelection = hasSelection && !scanning;
+        bool hasItems = currentScanResults.Count > 0 && !scanning && !actionRunning;
+        hasSelection = hasSelection && !scanning && !actionRunning;
 
         btnUnlock.Enabled = hasSelection;
         btnKill.Enabled = hasSelection;
-        btnUnlockAll.Enabled = hasItems;
-        btnKillAll.Enabled = hasItems;
-        btnForceDelete.Enabled = targetPaths.Count > 0 && !scanning;
+        btnKillRecycle.Enabled = targetPaths.Count > 0 && !scanning && !actionRunning;
+        btnKillRename.Enabled = targetPaths.Count == 1 && !scanning && !actionRunning;
+        btnKillMove.Enabled = targetPaths.Count > 0 && !scanning && !actionRunning;
+        btnKillCopy.Enabled = targetPaths.Count > 0 && !scanning && !actionRunning;
+        btnReload.Enabled = !scanning && !actionRunning && targetPaths.Count > 0;
+        if (btnMore != null) btnMore.Enabled = true;
+
+        if (miUnlockAll != null) miUnlockAll.Enabled = hasItems;
+        if (miKillAll != null) miKillAll.Enabled = hasItems;
+        if (miKillPermanent != null) miKillPermanent.Enabled = targetPaths.Count > 0 && !scanning && !actionRunning;
+        if (miKillRestart != null) miKillRestart.Enabled = targetPaths.Count > 0 && !scanning && !actionRunning;
+        if (miRepairPermissions != null) miRepairPermissions.Enabled = targetPaths.Count > 0 && !scanning && !actionRunning;
+        if (miCancelScan != null) miCancelScan.Enabled = scanning;
+        if (miCancelAction != null) miCancelAction.Enabled = actionRunning;
+        if (miClearTargets != null) miClearTargets.Enabled = targetPaths.Count > 0 && !scanning && !actionRunning;
     }
 
     private void UpdateTargetLabel() {
@@ -142,6 +222,7 @@ public partial class UnlockerForm : Form {
         try {
             Directory.CreateDirectory(pendingDir);
         } catch { }
+        PendingActionStore.CleanupExpired();
 
         ipcTimer = new System.Windows.Forms.Timer();
         ipcTimer.Interval = 50; 
@@ -153,6 +234,12 @@ public partial class UnlockerForm : Form {
 
     private void ProcessExistingPendingFiles(string pendingDir) {
         try {
+            if (!string.IsNullOrEmpty(pendingActionId)) {
+                FileActionResult result = FileActionCoordinator.ConsumeResult(pendingActionId);
+                if (result != null) {
+                    BeginInvoke(new MethodInvoker(delegate { FinishFileAction(result); }));
+                }
+            }
             if (!Directory.Exists(pendingDir)) return;
             string[] files = Directory.GetFiles(pendingDir, "*.tmp");
             foreach (string file in files) {
@@ -248,6 +335,294 @@ public partial class UnlockerForm : Form {
         }
     }
 
+    private void UnlockerForm_DragEnter(object sender, DragEventArgs e) {
+        e.Effect = e.Data != null && e.Data.GetDataPresent(DataFormats.FileDrop) ? DragDropEffects.Copy : DragDropEffects.None;
+    }
+
+    private void UnlockerForm_DragDrop(object sender, DragEventArgs e) {
+        string[] dropped = e.Data == null ? null : e.Data.GetData(DataFormats.FileDrop) as string[];
+        if (dropped == null) return;
+        bool added = false;
+        foreach (string path in dropped) {
+            if (!string.IsNullOrEmpty(path) && targetPaths.Add(path)) added = true;
+        }
+        if (added) {
+            UpdateTargetLabel();
+            RequestScan();
+        }
+    }
+
+    private void BtnCancelScan_Click(object sender, EventArgs e) {
+        if (scanCancellation != null) scanCancellation.Cancel();
+    }
+
+    private void BtnClearTargets_Click(object sender, EventArgs e) {
+        if (targetPaths.Count == 0) return;
+        if (MessageBox.Show(this, "Remove all queued targets from this window?", "Clear Targets", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
+        targetPaths.Clear();
+        currentScanResults.Clear();
+        lastScanResult = null;
+        UpdateTargetLabel();
+        ShowListMessage("No targets queued. Drag files or folders here, or use + File / + Folder.");
+        UpdateButtonStates();
+    }
+
+    private List<string> GetTargetSnapshot() {
+        lock (ipcLock) return new List<string>(targetPaths);
+    }
+
+    private void BeginKillDelete(DeleteMode mode, bool advanced) {
+        List<string> targets = GetTargetSnapshot();
+        if (targets.Count == 0) return;
+        if (advanced && (!isAdmin || MessageBox.Show(this, "This permanently deletes a protected Windows target. Windows may become unstable. Continue?", "Advanced Protected Target Action", MessageBoxButtons.YesNo, MessageBoxIcon.Stop) != DialogResult.Yes)) return;
+        var requests = new List<FileOperationRequest>();
+        foreach (string path in targets) requests.Add(new FileOperationRequest { Kind = FileOperationKind.Delete, DeleteMode = mode, SourcePath = path });
+        BeginKillFileAction(requests, mode == DeleteMode.RecycleBin ? "Kill & Recycle" : mode == DeleteMode.Permanent ? "Kill & Permanent Delete" : "Kill & Delete at Restart", advanced);
+    }
+
+    private void BeginKillRename() {
+        List<string> targets = GetTargetSnapshot();
+        if (targets.Count == 0) return;
+        string source = targets[0];
+        string currentName = Path.GetFileName(source.TrimEnd('\\', '/'));
+        string newName = PromptForText("Rename Target", "New file or folder name:", currentName);
+        if (string.IsNullOrEmpty(newName)) return;
+        BeginKillFileAction(new List<FileOperationRequest> {
+            new FileOperationRequest { Kind = FileOperationKind.Rename, SourcePath = source, DestinationPath = newName }
+        }, "Kill & Rename", false);
+    }
+
+    private void BeginKillMoveOrCopy(bool copy) {
+        List<string> targets = GetTargetSnapshot();
+        if (targets.Count == 0) return;
+        using (FolderBrowserDialog dialog = new FolderBrowserDialog()) {
+            dialog.Description = copy ? "Select the destination folder for the copy:" : "Select the destination folder for the move:";
+            if (dialog.ShowDialog(this) != DialogResult.OK) return;
+            var requests = new List<FileOperationRequest>();
+            foreach (string path in targets) requests.Add(new FileOperationRequest {
+                Kind = copy ? FileOperationKind.Copy : FileOperationKind.Move,
+                SourcePath = path,
+                DestinationPath = dialog.SelectedPath,
+                ReplaceExisting = false
+            });
+            BeginKillFileAction(requests, copy ? "Kill & Copy" : "Kill & Move", false);
+        }
+    }
+
+    private void RepairTargetPermissions() {
+        if (!isAdmin) {
+            PromptForElevation();
+            return;
+        }
+        List<string> targets = GetTargetSnapshot();
+        if (targets.Count == 0) return;
+        if (MessageBox.Show(this, "This grants full access to the local Administrators and Users groups for the selected targets. Continue?", "Repair Permissions", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
+        var requests = new List<FileOperationRequest>();
+        foreach (string path in targets) requests.Add(new FileOperationRequest { Kind = FileOperationKind.RepairPermissions, SourcePath = path });
+        BeginDirectFileAction(requests, "Repair Permissions");
+    }
+
+    private void BeginKillFileAction(List<FileOperationRequest> requests, string title, bool allowProtectedTargets) {
+        FileActionRequest action = new FileActionRequest {
+            Title = title,
+            Operations = requests,
+            LockActionMode = LockActionMode.DetectedLockersOnly,
+            AllowProtectedTargets = allowProtectedTargets
+        };
+        StartPreparedAction(action);
+    }
+
+    private void BeginDirectFileAction(List<FileOperationRequest> requests, string title) {
+        FileActionRequest action = new FileActionRequest {
+            Title = title,
+            Operations = requests,
+            LockActionMode = LockActionMode.None,
+            AllowProtectedTargets = true
+        };
+        StartPreparedAction(action);
+    }
+
+    private void StartPreparedAction(FileActionRequest request) {
+        if (request == null || request.Operations == null || request.Operations.Count == 0) return;
+        if (operationCancellation != null) operationCancellation.Cancel();
+        operationCancellation = new CancellationTokenSource();
+        CancellationToken token = operationCancellation.Token;
+        lock (scanLock) { isActionRunning = true; }
+        SetStatus("Preparing " + request.Title + "...", Color.FromArgb(52, 73, 94));
+        UpdateButtonStates();
+        Task.Factory.StartNew<FileActionPlan>(delegate {
+            return FileActionCoordinator.Prepare(request, token, delegate(string message, int value) { ReportActionProgress(message, value); });
+        }, CancellationToken.None).ContinueWith(delegate(Task<FileActionPlan> task) {
+            if (IsDisposed || !IsHandleCreated) return;
+            BeginInvoke(new MethodInvoker(delegate {
+                if (task.IsCanceled || task.IsFaulted) {
+                    FinishFileAction(new FileActionResult { ActionId = request.ActionId, Status = FileActionStatus.Failed, ErrorMessage = task.Exception == null ? "Action preparation failed." : task.Exception.GetBaseException().Message });
+                    return;
+                }
+                FileActionPlan plan = task.Result;
+                if (!string.IsNullOrEmpty(plan.ErrorMessage)) {
+                    FinishFileAction(new FileActionResult { ActionId = request.ActionId, Status = token.IsCancellationRequested ? FileActionStatus.Cancelled : FileActionStatus.Failed, ErrorMessage = plan.ErrorMessage });
+                    return;
+                }
+                if (request.LockActionMode == LockActionMode.None) ExecutePreparedFileAction(request, plan, token);
+                else ConfirmAndExecuteFileAction(request, plan, token, 0);
+            }));
+        });
+    }
+
+    private void ConfirmAndExecuteFileAction(FileActionRequest request, FileActionPlan initialPlan, CancellationToken token, int recheckCount) {
+        if (token.IsCancellationRequested) {
+            FinishFileAction(new FileActionResult { ActionId = request.ActionId, Status = FileActionStatus.Cancelled, ErrorMessage = "Operation cancelled." });
+            return;
+        }
+        if (!ShowKillActionConfirmation(request, initialPlan)) {
+            FinishFileAction(new FileActionResult { ActionId = request.ActionId, Status = FileActionStatus.Cancelled, ErrorMessage = "Action cancelled by the user." });
+            return;
+        }
+        if (recheckCount >= 3) {
+            FinishFileAction(new FileActionResult { ActionId = request.ActionId, Status = FileActionStatus.Failed, ErrorMessage = "The locking processes changed repeatedly. The action was stopped before termination." });
+            return;
+        }
+        SetStatus("Rechecking locks before termination...", Color.FromArgb(52, 73, 94));
+        Task.Factory.StartNew<FileActionPlan>(delegate {
+            return FileActionCoordinator.Prepare(request, token, delegate(string message, int value) { ReportActionProgress(message, value); });
+        }, CancellationToken.None).ContinueWith(delegate(Task<FileActionPlan> task) {
+            if (IsDisposed || !IsHandleCreated) return;
+            BeginInvoke(new MethodInvoker(delegate {
+                if (task.IsCanceled || task.IsFaulted) {
+                    FinishFileAction(new FileActionResult { ActionId = request.ActionId, Status = FileActionStatus.Failed, ErrorMessage = "The lock recheck failed." });
+                    return;
+                }
+                FileActionPlan currentPlan = task.Result;
+                if (!string.IsNullOrEmpty(currentPlan.ErrorMessage)) {
+                    FinishFileAction(new FileActionResult { ActionId = request.ActionId, Status = FileActionStatus.Failed, ErrorMessage = currentPlan.ErrorMessage });
+                    return;
+                }
+                if (!string.Equals(initialPlan.LockerSignature, currentPlan.LockerSignature, StringComparison.Ordinal)) {
+                    ConfirmAndExecuteFileAction(request, currentPlan, token, recheckCount + 1);
+                    return;
+                }
+                ExecutePreparedFileAction(request, currentPlan, token);
+            }));
+        });
+    }
+
+    private void ExecutePreparedFileAction(FileActionRequest request, FileActionPlan plan, CancellationToken token) {
+        SetStatus("Terminating detected lockers...", Color.FromArgb(192, 57, 43));
+        Task.Factory.StartNew<FileActionResult>(delegate {
+            return FileActionCoordinator.ExecuteConfirmed(request, plan, isAdmin, token, delegate(string message, int value) { ReportActionProgress(message, value); });
+        }, CancellationToken.None).ContinueWith(delegate(Task<FileActionResult> task) {
+            if (IsDisposed || !IsHandleCreated) return;
+            BeginInvoke(new MethodInvoker(delegate {
+                if (task.IsCanceled || task.IsFaulted) {
+                    FinishFileAction(new FileActionResult { ActionId = request.ActionId, Status = FileActionStatus.Failed, ErrorMessage = "The file action failed." });
+                    return;
+                }
+                FileActionResult result = task.Result;
+                if (result.Status == FileActionStatus.NeedsElevation && result.CanRetryElevated && !isAdmin) {
+                    request.PreviouslyTerminatedPids = result.TerminatedPids;
+                    string error;
+                    if (FileActionCoordinator.LaunchElevated(request, out error)) {
+                        pendingActionId = request.ActionId;
+                        pendingElevationRequest = request;
+                        SetStatus("Waiting for elevated retry...", Color.FromArgb(211, 84, 0));
+                        UpdateButtonStates();
+                    } else {
+                        FinishFileAction(new FileActionResult { ActionId = request.ActionId, Status = FileActionStatus.Failed, ErrorMessage = "Elevation was not started: " + error });
+                    }
+                    return;
+                }
+                FinishFileAction(result);
+            }));
+        });
+    }
+
+    private bool ShowKillActionConfirmation(FileActionRequest request, FileActionPlan plan) {
+        StringBuilder text = new StringBuilder();
+        text.AppendLine(request.Title + " will terminate detected locking processes, then continue.");
+        text.AppendLine();
+        text.AppendLine("Targets:");
+        foreach (FileOperationRequest operation in request.Operations) text.AppendLine("  " + operation.SourcePath);
+        if (plan.Lockers.Count == 0) {
+            text.AppendLine();
+            text.AppendLine("No active lockers are currently detected. No unrelated process will be terminated.");
+        } else {
+            text.AppendLine();
+            text.AppendLine("Processes to terminate:");
+            foreach (ProcessItem item in plan.Lockers) text.AppendLine("  " + item.Name + " (PID " + item.Pid + ") - " + (item.Path ?? "Executable unavailable"));
+        }
+        text.AppendLine();
+        text.AppendLine("Terminated applications may lose unsaved work. Continue?");
+        return MessageBox.Show(this, text.ToString(), request.Title, MessageBoxButtons.YesNo, plan.Lockers.Count == 0 ? MessageBoxIcon.Question : MessageBoxIcon.Warning) == DialogResult.Yes;
+    }
+
+    private void ReportActionProgress(string message, int value) {
+        if (IsDisposed || !IsHandleCreated) return;
+        try {
+            BeginInvoke(new MethodInvoker(delegate {
+                if (progressBar != null) {
+                    progressBar.Visible = true;
+                    progressBar.Value = Math.Min(100, Math.Max(0, value));
+                }
+                SetStatus(message, Color.FromArgb(52, 73, 94));
+            }));
+        } catch { }
+    }
+
+    private void FinishFileAction(FileActionResult result) {
+        pendingActionId = null;
+        pendingElevationRequest = null;
+        lock (scanLock) { isActionRunning = false; }
+        if (operationCancellation != null) operationCancellation.Dispose();
+        operationCancellation = null;
+        if (result != null && result.Targets != null) {
+            foreach (FileActionTargetResult target in result.Targets) if (target.Success) targetPaths.Remove(target.SourcePath);
+        }
+        UpdateTargetLabel();
+        UpdateButtonStates();
+        progressBar.Visible = false;
+        StringBuilder report = new StringBuilder();
+        if (result != null && result.Targets != null) {
+            foreach (FileActionTargetResult target in result.Targets) report.AppendLine((target.Success ? "Completed: " : "Failed: ") + target.SourcePath + (target.Success && target.Scheduled ? " (scheduled for restart)" : target.Success ? "" : " - " + target.ErrorMessage));
+        }
+        if (result != null && result.UnresolvablePids.Count > 0) report.AppendLine("Unresolved locking PID(s): " + string.Join(", ", result.UnresolvablePids.ToArray()));
+        if (result != null && !string.IsNullOrEmpty(result.ErrorMessage)) report.AppendLine(result.ErrorMessage);
+        if (result == null || result.Status == FileActionStatus.Cancelled) SetStatus("File action cancelled.", Color.FromArgb(127, 140, 141));
+        else if (result.Status == FileActionStatus.Completed) SetStatus("File action completed.", Color.FromArgb(39, 174, 96));
+        else SetStatus("File action completed with warnings.", Color.FromArgb(211, 84, 0));
+        if (result != null && result.Status != FileActionStatus.Cancelled && report.Length > 0) MessageBox.Show(this, report.ToString(), "File Action Result", MessageBoxButtons.OK, result.Status == FileActionStatus.Completed ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
+        StartAsyncScan(true);
+    }
+
+    private void BtnCancelAction_Click(object sender, EventArgs e) {
+        if (operationCancellation != null) operationCancellation.Cancel();
+        if (pendingActionId != null) {
+            pendingActionId = null;
+            pendingElevationRequest = null;
+            lock (scanLock) { isActionRunning = false; }
+            SetStatus("Elevated retry cancelled.", Color.FromArgb(127, 140, 141));
+            UpdateButtonStates();
+        }
+    }
+
+    private string PromptForText(string title, string labelText, string initialValue) {
+        using (Form prompt = new Form()) {
+            prompt.Text = title;
+            prompt.FormBorderStyle = FormBorderStyle.FixedDialog;
+            prompt.StartPosition = FormStartPosition.CenterParent;
+            prompt.ClientSize = new Size(420, 125);
+            prompt.MinimizeBox = false;
+            prompt.MaximizeBox = false;
+            Label label = new Label { Text = labelText, Location = new Point(12, 12), Size = new Size(390, 20) };
+            TextBox input = new TextBox { Text = initialValue, Location = new Point(12, 38), Size = new Size(390, 24) };
+            Button ok = new Button { Text = "OK", DialogResult = DialogResult.OK, Location = new Point(240, 78), Size = new Size(78, 28) };
+            Button cancel = new Button { Text = "Cancel", DialogResult = DialogResult.Cancel, Location = new Point(324, 78), Size = new Size(78, 28) };
+            prompt.Controls.Add(label); prompt.Controls.Add(input); prompt.Controls.Add(ok); prompt.Controls.Add(cancel);
+            prompt.AcceptButton = ok; prompt.CancelButton = cancel; input.SelectAll(); input.Focus();
+            return prompt.ShowDialog(this) == DialogResult.OK ? input.Text.Trim() : null;
+        }
+    }
+
     private void TxtFilter_TextChanged(object sender, EventArgs e) {
         ApplyFilter(txtFilter.Text.Trim());
     }
@@ -261,9 +636,41 @@ public partial class UnlockerForm : Form {
         }
     }
 
+    private void ShowProcessDetails(ProcessItem item) {
+        if (item == null) return;
+        SetStatus("Reading process details...");
+        Task.Factory.StartNew<ProcessDetails>(delegate { return GetProcessDetails(item.Pid, true); }).ContinueWith(delegate(Task<ProcessDetails> task) {
+            if (IsDisposed || !IsHandleCreated) return;
+            BeginInvoke(new MethodInvoker(delegate {
+                ProcessDetails details = task.IsFaulted ? null : task.Result;
+                if (details == null) {
+                    MessageBox.Show(this, "Process details are unavailable.", "Process Details", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    return;
+                }
+                var text = new StringBuilder();
+                text.AppendLine(details.Name + " (PID " + details.Pid + ")");
+                text.AppendLine("Executable: " + (details.ExecutablePath ?? "Unavailable"));
+                text.AppendLine("Account: " + (details.Account ?? "Unavailable"));
+                text.AppendLine("Parent PID: " + (details.ParentPid == 0 ? "Unavailable" : details.ParentPid.ToString()));
+                text.AppendLine("Architecture: " + (details.IsWow64 ? "32-bit process" : "64-bit or unavailable"));
+                text.AppendLine("Command line: " + (details.CommandLine ?? "Unavailable"));
+                if (item.Matches != null && item.Matches.Count > 0) {
+                    text.AppendLine();
+                    text.AppendLine("Matched paths:");
+                    foreach (LockMatch match in item.Matches) text.AppendLine("  " + match.LockedPath + " (" + match.Source + ")");
+                }
+                SetStatus("Ready.");
+                MessageBox.Show(this, text.ToString(), "Process Details", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }));
+        });
+    }
+
     private void StartAsyncScan(bool forceRefresh = false) {
         lock (scanLock) {
-            if (isScanning) return; 
+            if (isScanning) {
+                rescanPending = true;
+                return;
+            }
             isScanning = true;
         }
 
@@ -298,51 +705,54 @@ public partial class UnlockerForm : Form {
         if (this.InvokeRequired) this.BeginInvoke(initUI);
         else initUI();
 
-        int minW, minI;
-        ThreadPool.GetMinThreads(out minW, out minI);
-        ThreadPool.SetMinThreads(Math.Max(minW, Environment.ProcessorCount * 16 + 100), minI);
-
-        Task.Factory.StartNew(delegate {
-            try {
-                Log("Initiating Scan...");
-                List<ProcessItem> results = RunFastHandleScan(targetsSnapshot, forceRefresh, delegate(int val) {
-                    this.BeginInvoke(new MethodInvoker(delegate {
-                        if (progressBar.Value != val) progressBar.Value = Math.Min(100, Math.Max(0, val));
+        if (scanCancellation != null) scanCancellation.Cancel();
+        scanCancellation = new CancellationTokenSource();
+        CancellationToken token = scanCancellation.Token;
+        Task.Factory.StartNew<ScanResult>(delegate {
+            Log("Initiating scan...");
+            ScanRequest request = new ScanRequest(targetsSnapshot);
+            request.ForceRefresh = forceRefresh;
+            request.CancellationToken = token;
+            request.Deadline = TimeSpan.FromSeconds(30);
+            return RunScan(request, delegate(int val) {
+                if (IsDisposed || !IsHandleCreated) return;
+                try {
+                    BeginInvoke(new MethodInvoker(delegate {
+                        if (!IsDisposed && progressBar.Value != val) progressBar.Value = Math.Min(100, Math.Max(0, val));
                     }));
-                });
-
-                this.BeginInvoke(new MethodInvoker(delegate {
+                } catch { }
+            });
+        }, token).ContinueWith(delegate(Task<ScanResult> task) {
+            if (IsDisposed || !IsHandleCreated) return;
+            try {
+                BeginInvoke(new MethodInvoker(delegate {
+                    ScanResult scan = task.IsCanceled ? new ScanResult { Status = ScanStatus.Cancelled, ErrorMessage = "Scan was cancelled." } :
+                        task.IsFaulted ? new ScanResult { Status = ScanStatus.Failed, ErrorMessage = task.Exception == null ? "Scan failed." : task.Exception.GetBaseException().Message } : task.Result;
+                    lastScanResult = scan;
+                    currentScanResults = scan.Processes ?? new List<ProcessItem>();
                     progressBar.Visible = false;
-                    if (results.Count == 1) {
+                    if (scan.Status == ScanStatus.Cancelled) {
+                        SetStatus("Scan cancelled. Completed results are shown.", Color.FromArgb(127, 140, 141));
+                    } else if (scan.Status == ScanStatus.TimedOut) {
+                        SetStatus("Scan timed out. Partial results are shown.", Color.FromArgb(211, 84, 0));
+                    } else if (scan.Status == ScanStatus.Partial) {
+                        SetStatus("Scan partially completed. Review the available results.", Color.FromArgb(211, 84, 0));
+                    } else if (scan.Status == ScanStatus.Failed) {
+                        SetStatus("Scan failed: " + scan.ErrorMessage, Color.FromArgb(192, 57, 43));
+                    } else if (currentScanResults.Count == 1) {
                         SetStatus("1 locking process found.", Color.FromArgb(192, 57, 43));
-                    } else if (results.Count > 1) {
-                        SetStatus(string.Format("{0} locking processes found.", results.Count), Color.FromArgb(192, 57, 43));
+                    } else if (currentScanResults.Count > 1) {
+                        SetStatus(string.Format("{0} locking processes found.", currentScanResults.Count), Color.FromArgb(192, 57, 43));
                     } else {
                         SetStatus("No active locks found.", Color.FromArgb(39, 174, 96));
                     }
-                    currentScanResults = results;
                     ApplyFilter(txtFilter.Text.Trim());
-                    lock (scanLock) { isScanning = false; }
+                    bool repeat;
+                    lock (scanLock) { isScanning = false; repeat = rescanPending; rescanPending = false; }
                     UpdateButtonStates();
-                    if (rescanPending) {
-                        rescanPending = false;
-                        StartAsyncScan(true);
-                    }
+                    if (repeat) StartAsyncScan(true);
                 }));
-            } catch (Exception ex) {
-                Log("Scan error: " + ex.Message);
-                this.BeginInvoke(new MethodInvoker(delegate {
-                    progressBar.Visible = false;
-                    SetStatus("Scan failed: " + ex.Message, Color.FromArgb(192, 57, 43));
-                    MessageBox.Show("Scan error: " + ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                    lock (scanLock) { isScanning = false; }
-                    UpdateButtonStates();
-                    if (rescanPending) {
-                        rescanPending = false;
-                        StartAsyncScan(true);
-                    }
-                }));
-            }
+            } catch { }
         });
     }
 
@@ -383,6 +793,23 @@ public partial class UnlockerForm : Form {
         return Severity.High; 
     }
 
+    private static string GetPrimaryLockedPath(ProcessItem item) {
+        if (item != null && item.Matches != null && item.Matches.Count > 0) {
+            foreach (LockMatch match in item.Matches) {
+                if (match != null && !string.IsNullOrEmpty(match.LockedPath)) return match.LockedPath;
+            }
+        }
+        return item == null ? "" : item.Path;
+    }
+
+    private static bool HasMatchingLockedPath(ProcessItem item, string filterText) {
+        if (item == null || item.Matches == null) return false;
+        foreach (LockMatch match in item.Matches) {
+            if (match != null && match.LockedPath != null && match.LockedPath.IndexOf(filterText, StringComparison.OrdinalIgnoreCase) >= 0) return true;
+        }
+        return false;
+    }
+
     private void ApplyFilter(string filterText) {
         listView.BeginUpdate();
         listView.Items.Clear();
@@ -405,7 +832,8 @@ public partial class UnlockerForm : Form {
             filtered = currentScanResults.FindAll(x => 
                 (x.Name != null && x.Name.IndexOf(filterText, StringComparison.OrdinalIgnoreCase) >= 0) ||
                 (x.Pid.ToString().Contains(filterText)) ||
-                (x.Path != null && x.Path.IndexOf(filterText, StringComparison.OrdinalIgnoreCase) >= 0)
+                (x.Path != null && x.Path.IndexOf(filterText, StringComparison.OrdinalIgnoreCase) >= 0) ||
+                HasMatchingLockedPath(x, filterText)
             );
         }
 
@@ -436,7 +864,7 @@ public partial class UnlockerForm : Form {
                 item.Name, 
                 item.Pid.ToString(), 
                 accessInfo, 
-                item.Path 
+                GetPrimaryLockedPath(item)
             });
             lvi.ImageIndex = iconIndex;
             lvi.Tag = item;
@@ -519,239 +947,44 @@ public partial class UnlockerForm : Form {
                 if (!p.WaitForExit(2000)) Log("Warning: " + name + " (PID: " + pid + ") did not exit fully.");
             }
             return true;
+        } catch (ArgumentException) {
+            // The process may have exited after the scan and before this call.
+            return true;
+        } catch (InvalidOperationException) {
+            // Treat an exit race as cleared; verification follows the kill pass.
+            return true;
         } catch {
             return false;
         }
     }
 
-    private void ResetFilePermissions(string path) {
-        try {
-            using (var p = new Process()) {
-                p.StartInfo.FileName = "takeown.exe";
-                p.StartInfo.Arguments = "/F \"" + path + "\" /A"; 
-                p.StartInfo.CreateNoWindow = true;
-                p.StartInfo.UseShellExecute = false;
-                p.Start();
-                p.WaitForExit(3000);
-            }
-
-            using (var p = new Process()) {
-                p.StartInfo.FileName = "icacls.exe";
-                p.StartInfo.Arguments = "\"" + path + "\" /grant *S-1-5-32-544:F *S-1-5-32-545:F /T /C"; 
-                p.StartInfo.CreateNoWindow = true;
-                p.StartInfo.UseShellExecute = false;
-                p.Start();
-                p.WaitForExit(3000);
-            }
-        } catch { }
-    }
-
-    private static string GetSystemErrorMessage(int errCode) {
-        switch (errCode) {
-            case 2: return "File not found (ERROR_FILE_NOT_FOUND).";
-            case 3: return "Path not found (ERROR_PATH_NOT_FOUND).";
-            case 5: return "Access is denied (ERROR_ACCESS_DENIED).";
-            case 18: return "No more files left to analyze (ERROR_NO_MORE_FILES).";
-            case 32: return "The file is being used by another active process (ERROR_SHARING_VIOLATION).";
-            case 33: return "The file is locked by another active process (ERROR_LOCK_VIOLATION).";
-            case 145: return "The directory is not empty (ERROR_DIR_NOT_EMPTY).";
-            default: return "Windows System Error Code " + errCode + ".";
-        }
-    }
-
-    private bool AttemptDelete(string path, out int win32Err, out string errorMsg) {
-        win32Err = 0;
-        errorMsg = null;
-
-        try {
-            if (Directory.Exists(path)) {
-                if (RemoveDirectory(path)) return true;
-                win32Err = Marshal.GetLastWin32Error();
-
-                // If directory deletion failed (e.g. not empty or locked files inside), recursively try removing contents
-                try {
-                    foreach (string file in Directory.GetFiles(path, "*", SearchOption.AllDirectories)) {
-                        try { File.SetAttributes(file, FileAttributes.Normal); } catch { }
-                    }
-                    Directory.Delete(path, true);
-                    return true;
-                } catch (Exception exDir) {
-                    win32Err = Marshal.GetHRForException(exDir) & 0xFFFF;
-                    errorMsg = exDir.Message;
-                    return false;
-                }
-            } else if (File.Exists(path)) {
-                if (DeleteFile(path)) return true;
-                win32Err = Marshal.GetLastWin32Error();
-                return false;
-            }
-            return true; // Already gone
-        } catch (Exception ex) {
-            win32Err = Marshal.GetHRForException(ex) & 0xFFFF;
-            errorMsg = ex.Message;
-            return false;
-        }
-    }
-
-    private void ForceDeleteTargets() {
-        if (targetPaths.Count == 0) {
-            MessageBox.Show("No files or folders are currently loaded to delete.", "No Targets", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-            return;
-        }
-
-        // Check if locking processes are actively detected
-        bool hasLockingProcesses = false;
-        foreach (var pi in currentScanResults) {
-            if (pi != null && pi.Pid != 4) {
-                hasLockingProcesses = true;
-                break;
-            }
-        }
-
-        if (hasLockingProcesses) {
-            string inUsePrompt = "This cannot be removed because an application is currently using it.\n\n" +
-                                 "Do you want to kill the locking process(es) first using UnBlock and delete it?";
-            DialogResult dr = MessageBox.Show(inUsePrompt, "Target In Use - UnBlock", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
-            if (dr != DialogResult.Yes) {
-                return;
-            }
-
-            foreach (var pi in currentScanResults) {
-                if (pi != null && pi.Pid != 4) {
-                    KillProcessSafely(pi.Pid, pi.Name);
-                }
-            }
-        } else {
-            var sbConfirm = new StringBuilder();
-            sbConfirm.AppendLine("This will permanently delete the following target(s):");
-            foreach (var p in targetPaths) {
-                sbConfirm.AppendLine("• " + p);
-            }
-            sbConfirm.AppendLine();
-            sbConfirm.AppendLine("Proceed with deletion?");
-
-            if (MessageBox.Show(sbConfirm.ToString(), "Delete Target(s)?", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) {
-                return;
-            }
-        }
-
-        var report = new StringBuilder();
-        bool anyFailedImmediate = false;
-        var deletedPaths = new List<string>();
-
-        foreach (string rawPath in new List<string>(targetPaths)) {
-            string path = rawPath.Trim();
-            if (string.IsNullOrEmpty(path)) continue;
-
-            report.AppendLine("Processing: " + path);
-
-            bool exists = File.Exists(path) || Directory.Exists(path);
-            if (!exists) {
-                report.AppendLine("  -> File/Folder does not exist or was already deleted.");
-                report.AppendLine();
-                deletedPaths.Add(rawPath);
-                continue;
-            }
-
-            try {
-                File.SetAttributes(path, FileAttributes.Normal);
-            } catch (Exception ex) {
-                report.AppendLine("  [Warning] Failed to clear file attributes: " + ex.Message);
-            }
-
-            if (isAdmin) {
-                try {
-                    ResetFilePermissions(path);
-                    report.AppendLine("  [Success] Security permissions updated.");
-                } catch (Exception ex) {
-                    report.AppendLine("  [Warning] Could not reset permissions: " + ex.Message);
-                }
-            }
-
-            int win32Err;
-            string errorMsg;
-            bool success = AttemptDelete(path, out win32Err, out errorMsg);
-
-            // If deletion failed due to sharing violation, lock violation, or access denial (in use)
-            if (!success && (win32Err == 32 || win32Err == 33 || win32Err == 5)) {
-                string promptMsg = string.Format("'{0}' cannot be removed because an application is currently using it ({1}).\n\n" +
-                                                 "Do you want to terminate the locking process(es) first using UnBlock and retry deleting it?", 
-                                                 Path.GetFileName(path), GetSystemErrorMessage(win32Err));
-
-                if (MessageBox.Show(promptMsg, "File In Use - Kill & Delete?", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.Yes) {
-                    // Probe and terminate any processes holding locks on this path
-                    try {
-                        var specificScan = RunFastHandleScan(new HashSet<string>(new[] { path }, StringComparer.OrdinalIgnoreCase), true, delegate { });
-                        foreach (var pi in specificScan) {
-                            if (pi != null && pi.Pid != 4) {
-                                KillProcessSafely(pi.Pid, pi.Name);
-                            }
-                        }
-                    } catch { }
-
-                    try { File.SetAttributes(path, FileAttributes.Normal); } catch { }
-                    if (isAdmin) ResetFilePermissions(path);
-
-                    success = AttemptDelete(path, out win32Err, out errorMsg);
-                }
-            }
-
-            if (success) {
-                report.AppendLine("  [Success] File/Folder deleted successfully.");
-                deletedPaths.Add(rawPath);
-            } else {
-                anyFailedImmediate = true;
-                report.AppendLine("  [Failed] Immediate deletion failed.");
-                if (!string.IsNullOrEmpty(errorMsg)) {
-                    report.AppendLine("  [Details] " + errorMsg);
-                }
-                report.AppendLine("  [System Error Code] " + win32Err + " - " + GetSystemErrorMessage(win32Err));
-
-                if (isAdmin) {
-                    bool rebootRegistered = MoveFileEx(path, null, MOVEFILE_DELAY_UNTIL_REBOOT);
-                    if (rebootRegistered) {
-                        report.AppendLine("  [Success] Scheduled for permanent deletion on next reboot.");
-                        deletedPaths.Add(rawPath);
-                    } else {
-                        int rebootErr = Marshal.GetLastWin32Error();
-                        report.AppendLine("  [Failed] Could not schedule for reboot deletion (Error: " + rebootErr + ").");
-                    }
-                } else {
-                    report.AppendLine("  [Error] Standard user privileges cannot schedule reboot deletion.");
-                }
-            }
-            report.AppendLine();
-        }
-
-        foreach (var dp in deletedPaths) {
-            targetPaths.Remove(dp);
-        }
-        UpdateTargetLabel();
-
-        string title = anyFailedImmediate ? "Deletion Summary (Immediate Action Failed)" : "Deletion Successful";
-        var icon = anyFailedImmediate ? MessageBoxIcon.Warning : MessageBoxIcon.Information;
-        
-        MessageBox.Show(report.ToString(), title, MessageBoxButtons.OK, icon);
-        StartAsyncScan(true);
-    }
-
     private void BtnUnlock_Click(object sender, EventArgs e) {
-        if (listView.SelectedItems.Count == 0) return;
-        var item = listView.SelectedItems[0].Tag as ProcessItem;
-        if (item == null) return;
-
-        if (item.Handles.Count == 0 || item.IsModuleLock) {
-            MessageBox.Show("This file or directory is loaded directly as a running process, DLL, or mapped module. It cannot be unlocked by closing handles; you must terminate the process to free it.", "Cannot Unlock", MessageBoxButtons.OK, MessageBoxIcon.Information);
-            return;
+        List<ProcessItem> selected = GetSelectedProcessItems();
+        if (selected.Count == 0) return;
+        bool failed = false;
+        bool incompatible = false;
+        foreach (ProcessItem item in selected) {
+            if (item.Handles.Count == 0 || item.IsModuleLock) { incompatible = true; continue; }
+            if (!UnlockSafely(item.Pid, item.Handles, item.Name)) failed = true;
         }
-
-        if (UnlockSafely(item.Pid, item.Handles, item.Name)) {
-            MessageBox.Show("Handle(s) successfully closed.", "Success", MessageBoxButtons.OK, MessageBoxIcon.Information);
-            StartAsyncScan(true); 
+        if (!failed && !incompatible) {
+            MessageBox.Show("Selected handle(s) successfully closed.", "Success", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            StartAsyncScan(true);
+        } else if (failed && !isAdmin) {
+            PromptForElevation();
         } else {
-            if (!isAdmin) PromptForElevation();
-            else MessageBox.Show("Failed to close handle. The process might be heavily protected or kernel-level.", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            MessageBox.Show(incompatible ? "Some selected entries are executable or module locks and must be terminated instead of unlocked." : "One or more selected handles could not be closed.", "Incomplete", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            StartAsyncScan(true);
         }
+    }
+
+    private List<ProcessItem> GetSelectedProcessItems() {
+        var selected = new List<ProcessItem>();
+        foreach (ListViewItem row in listView.SelectedItems) {
+            ProcessItem item = row.Tag as ProcessItem;
+            if (item != null) selected.Add(item);
+        }
+        return selected;
     }
 
     private void BtnUnlockAll_Click(object sender, EventArgs e) {
@@ -779,24 +1012,17 @@ public partial class UnlockerForm : Form {
     }
 
     private void BtnKill_Click(object sender, EventArgs e) {
-        if (listView.SelectedItems.Count == 0) return;
-        var item = listView.SelectedItems[0].Tag as ProcessItem;
-        if (item == null) return;
-
-        if (item.Pid == 4) {
-            MessageBox.Show("You cannot terminate the Windows System Kernel.", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
-            return;
+        List<ProcessItem> selected = GetSelectedProcessItems();
+        if (selected.Count == 0) return;
+        if (MessageBox.Show("Forcibly terminate " + selected.Count + " selected process(es)? Unsaved work may be lost.", "Confirm Process Termination", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
+        bool failed = false;
+        foreach (ProcessItem item in selected) {
+            if (item.Pid == 4 || !KillProcessSafely(item.Pid, item.Name)) failed = true;
         }
-
-        if (MessageBox.Show("Are you sure you want to forcibly terminate '" + item.Name + "'?", "Warning", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.Yes) {
-            if (KillProcessSafely(item.Pid, item.Name)) {
-                MessageBox.Show("Process successfully terminated.", "Success", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                StartAsyncScan(true); 
-            } else {
-                if (!isAdmin) PromptForElevation();
-                else MessageBox.Show("Failed to terminate process.", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
-            }
-        }
+        if (failed && !isAdmin) PromptForElevation();
+        else if (failed) MessageBox.Show("One or more selected processes could not be terminated.", "Incomplete", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        else MessageBox.Show("Selected process(es) terminated.", "Success", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        StartAsyncScan(true);
     }
 
     private void BtnKillAll_Click(object sender, EventArgs e) {
@@ -820,7 +1046,7 @@ public partial class UnlockerForm : Form {
     }
 
     private void BtnForceDelete_Click(object sender, EventArgs e) {
-        ForceDeleteTargets();
+        BeginKillDelete(DeleteMode.RecycleBin, false);
     }
 
     private void BtnElevate_Click(object sender, EventArgs e) {
@@ -831,64 +1057,17 @@ public partial class UnlockerForm : Form {
         if (pid == 4) return false;
         try {
             using (var p = Process.GetProcessById(pid)) {
-                p.Kill();
-                p.WaitForExit(2000);
+                if (!p.HasExited) p.Kill();
+                if (!p.WaitForExit(3000) && !p.HasExited) return false;
             }
+            return true;
+        } catch (ArgumentException) {
+            // The process may have exited after the scan and before this call.
+            return true;
+        } catch (InvalidOperationException) {
+            // Treat an exit race as cleared; verification follows the kill pass.
             return true;
         } catch {
-            return false;
-        }
-    }
-
-    internal static void ResetFilePermissionsDirect(string path) {
-        try {
-            using (var p = new Process()) {
-                p.StartInfo.FileName = "takeown.exe";
-                p.StartInfo.Arguments = "/F \"" + path + "\" /A"; 
-                p.StartInfo.CreateNoWindow = true;
-                p.StartInfo.UseShellExecute = false;
-                p.Start();
-                p.WaitForExit(3000);
-            }
-
-            using (var p = new Process()) {
-                p.StartInfo.FileName = "icacls.exe";
-                p.StartInfo.Arguments = "\"" + path + "\" /grant *S-1-5-32-544:F *S-1-5-32-545:F /T /C"; 
-                p.StartInfo.CreateNoWindow = true;
-                p.StartInfo.UseShellExecute = false;
-                p.Start();
-                p.WaitForExit(3000);
-            }
-        } catch { }
-    }
-
-    internal static bool AttemptDeleteDirect(string path, out int win32Err, out string errorMsg) {
-        win32Err = 0;
-        errorMsg = null;
-        try {
-            if (Directory.Exists(path)) {
-                if (RemoveDirectory(path)) return true;
-                win32Err = Marshal.GetLastWin32Error();
-                try {
-                    foreach (string file in Directory.GetFiles(path, "*", SearchOption.AllDirectories)) {
-                        try { File.SetAttributes(file, FileAttributes.Normal); } catch { }
-                    }
-                    Directory.Delete(path, true);
-                    return true;
-                } catch (Exception exDir) {
-                    win32Err = Marshal.GetHRForException(exDir) & 0xFFFF;
-                    errorMsg = exDir.Message;
-                    return false;
-                }
-            } else if (File.Exists(path)) {
-                if (DeleteFile(path)) return true;
-                win32Err = Marshal.GetLastWin32Error();
-                return false;
-            }
-            return true;
-        } catch (Exception ex) {
-            win32Err = Marshal.GetHRForException(ex) & 0xFFFF;
-            errorMsg = ex.Message;
             return false;
         }
     }
@@ -912,6 +1091,8 @@ public partial class UnlockerForm : Form {
     }
 
     protected override void OnFormClosed(FormClosedEventArgs e) {
+        if (scanCancellation != null) scanCancellation.Cancel();
+        if (operationCancellation != null) operationCancellation.Cancel();
         if (ipcTimer != null) {
             ipcTimer.Stop();
             ipcTimer.Dispose();

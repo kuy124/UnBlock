@@ -70,15 +70,6 @@ public partial class UnlockerForm {
     [DllImport("psapi.dll", EntryPoint = "GetMappedFileNameW", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern int GetMappedFileName(IntPtr hProcess, IntPtr lpv, StringBuilder lpFilename, int nSize);
 
-    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-    private static extern bool MoveFileEx(string lpExistingFileName, string lpNewFileName, uint dwFlags);
-
-    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-    private static extern bool DeleteFile(string lpFileName);
-
-    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-    private static extern bool RemoveDirectory(string lpPathName);
-
     [DllImport("advapi32.dll", SetLastError = true)]
     private static extern bool OpenProcessToken(IntPtr ProcessHandle, uint DesiredAccess, out IntPtr TokenHandle);
     
@@ -88,13 +79,15 @@ public partial class UnlockerForm {
     [DllImport("advapi32.dll", SetLastError = true)]
     private static extern bool AdjustTokenPrivileges(IntPtr TokenHandle, bool DisableAllPrivileges, ref TOKEN_PRIVILEGES NewState, uint BufferLength, IntPtr PreviousState, IntPtr ReturnLength);
 
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool IsWow64Process(IntPtr processHandle, out bool wow64Process);
+
     [DllImport("shell32.dll", CharSet = CharSet.Auto)]
     private static extern IntPtr ExtractIcon(IntPtr hInst, string lpszExeFileName, int nIconIndex);
 
     private const uint TH32CS_SNAPPROCESS = 0x00000002;
     private const uint TH32CS_SNAPMODULE = 0x00000008;
     private const uint TH32CS_SNAPMODULE32 = 0x00000010;
-    private const uint MOVEFILE_DELAY_UNTIL_REBOOT = 0x00000004;
     
     private const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
     private const uint PROCESS_DUP_HANDLE = 0x0040;

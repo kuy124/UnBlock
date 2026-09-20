@@ -14,41 +14,45 @@ public partial class UnlockerForm {
 
     internal static void InitFileTypeIndex() {
         if (CachedFileTypeIndex != 0) return;
+
+        lock (fileTypeIndexLock) {
+            if (CachedFileTypeIndex != 0) return;
         
-        string tempFile = Path.GetTempFileName();
-        IntPtr hFile = CreateFile(tempFile, GENERIC_WRITE, 0, IntPtr.Zero, OPEN_EXISTING, 0, IntPtr.Zero);
-        if (hFile != INVALID_HANDLE_VALUE) {
-            int bufferSize = 0x10000;
-            IntPtr buffer = Marshal.AllocHGlobal(bufferSize);
-            try {
-                int length = 0;
-                while (NtQuerySystemInformation(SystemExtendedHandleInformation, buffer, bufferSize, ref length) == unchecked((int)0xC0000004)) {
-                    bufferSize = length + 0x10000;
-                    Marshal.FreeHGlobal(buffer);
-                    buffer = Marshal.AllocHGlobal(bufferSize);
-                }
-
-                bool is64Bit = Marshal.SizeOf(typeof(IntPtr)) == 8;
-                long handleCount = is64Bit ? Marshal.ReadInt64(buffer) : Marshal.ReadInt32(buffer);
-                IntPtr ptr = new IntPtr(buffer.ToInt64() + (is64Bit ? 16 : 8));
-                int entrySize = is64Bit ? 40 : 28;
-                int currentPid = Process.GetCurrentProcess().Id;
-
-                for (long i = 0; i < handleCount; i++) {
-                    int pid = is64Bit ? (int)Marshal.ReadInt64(ptr, 8) : Marshal.ReadInt32(ptr, 4);
-                    IntPtr handleValue = is64Bit ? Marshal.ReadIntPtr(ptr, 16) : Marshal.ReadIntPtr(ptr, 8);
-                    
-                    if (pid == currentPid && handleValue == hFile) {
-                        CachedFileTypeIndex = (ushort)Marshal.ReadInt16(ptr, is64Bit ? 30 : 18);
-                        break;
+            string tempFile = Path.GetTempFileName();
+            IntPtr hFile = CreateFile(tempFile, GENERIC_WRITE, 0, IntPtr.Zero, OPEN_EXISTING, 0, IntPtr.Zero);
+            if (hFile != INVALID_HANDLE_VALUE) {
+                int bufferSize = 0x10000;
+                IntPtr buffer = Marshal.AllocHGlobal(bufferSize);
+                try {
+                    int length = 0;
+                    while (NtQuerySystemInformation(SystemExtendedHandleInformation, buffer, bufferSize, ref length) == unchecked((int)0xC0000004)) {
+                        bufferSize = length + 0x10000;
+                        Marshal.FreeHGlobal(buffer);
+                        buffer = Marshal.AllocHGlobal(bufferSize);
                     }
-                    ptr = new IntPtr(ptr.ToInt64() + entrySize);
+
+                    bool is64Bit = Marshal.SizeOf(typeof(IntPtr)) == 8;
+                    long handleCount = is64Bit ? Marshal.ReadInt64(buffer) : Marshal.ReadInt32(buffer);
+                    IntPtr ptr = new IntPtr(buffer.ToInt64() + (is64Bit ? 16 : 8));
+                    int entrySize = is64Bit ? 40 : 28;
+                    int currentPid = Process.GetCurrentProcess().Id;
+
+                    for (long i = 0; i < handleCount; i++) {
+                        int pid = is64Bit ? (int)Marshal.ReadInt64(ptr, 8) : Marshal.ReadInt32(ptr, 4);
+                        IntPtr handleValue = is64Bit ? Marshal.ReadIntPtr(ptr, 16) : Marshal.ReadIntPtr(ptr, 8);
+                    
+                        if (pid == currentPid && handleValue == hFile) {
+                            CachedFileTypeIndex = (ushort)Marshal.ReadInt16(ptr, is64Bit ? 30 : 18);
+                            break;
+                        }
+                        ptr = new IntPtr(ptr.ToInt64() + entrySize);
+                    }
+                } catch {
+                } finally {
+                    Marshal.FreeHGlobal(buffer);
+                    CloseHandle(hFile);
+                    try { File.Delete(tempFile); } catch { }
                 }
-            } catch {
-            } finally {
-                Marshal.FreeHGlobal(buffer);
-                CloseHandle(hFile);
-                try { File.Delete(tempFile); } catch { }
             }
         }
     }
@@ -190,7 +194,7 @@ public partial class UnlockerForm {
         return RunFastHandleScan(targets, true, null);
     }
 
-    internal static List<ProcessItem> RunFastHandleScan(HashSet<string> targets, bool forceRefresh, Action<int> progressCallback) {
+    private static List<ProcessItem> RunFastHandleScanLegacy(HashSet<string> targets, bool forceRefresh, Action<int> progressCallback) {
         var finalLockingProcesses = new Dictionary<int, ProcessItem>();
         var addedPids = new HashSet<int>();
 
@@ -551,18 +555,20 @@ public partial class UnlockerForm {
                         int pid = (int)pe32.th32ProcessID;
                         activePids.Add(pid);
                         ProcessNameMap[pid] = pe32.szExeFile;
+                        ProcessParentMap[pid] = (int)pe32.th32ParentProcessID;
 
                         string fullPath = QueryProcessPathDirect(pid);
                         if (fullPath != null) ProcessPathMap[pid] = fullPath;
                     } while (Process32Next(hSnapshot, ref pe32));
 
-                    var stalePids = new List<int>();
-                    foreach (var key in ProcessPathMap.Keys) {
-                        if (!activePids.Contains(key)) stalePids.Add(key);
-                    }
+                    var stalePids = new HashSet<int>();
+                    foreach (var key in ProcessPathMap.Keys) if (!activePids.Contains(key)) stalePids.Add(key);
+                    foreach (var key in ProcessNameMap.Keys) if (!activePids.Contains(key)) stalePids.Add(key);
+                    foreach (var key in ProcessParentMap.Keys) if (!activePids.Contains(key)) stalePids.Add(key);
                     foreach (var pid in stalePids) {
                         ProcessPathMap.Remove(pid);
                         ProcessNameMap.Remove(pid);
+                        ProcessParentMap.Remove(pid);
                     }
                 }
                 lastSnapshotTime = DateTime.UtcNow;

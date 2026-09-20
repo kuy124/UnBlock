@@ -23,7 +23,7 @@ jobs:
           $csc = Join-Path $env:WINDIR "Microsoft.NET\Framework64\v4.0.30319\csc.exe"
           New-Item -ItemType Directory -Force -Path "artifacts" | Out-Null
           $src = Get-ChildItem -LiteralPath "src" -Filter "*.cs" | Where-Object { $_.Name -ne "Setup.cs" }
-          $refs = @("/r:System.dll", "/r:System.Core.dll", "/r:System.Drawing.dll", "/r:System.Windows.Forms.dll")
+          $refs = @("/r:System.dll", "/r:System.Core.dll", "/r:System.Drawing.dll", "/r:System.Windows.Forms.dll", "/r:System.Management.dll", "/r:System.Runtime.Serialization.dll", "/r:System.Xml.dll")
           & $csc /nologo /target:winexe /optimize+ "/out:$PWD\artifacts\Unlocker.exe" $refs @($src.FullName)
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
@@ -31,7 +31,7 @@ jobs:
         shell: pwsh
         run: |
           $csc = Join-Path $env:WINDIR "Microsoft.NET\Framework64\v4.0.30319\csc.exe"
-          $refs = @("/r:System.dll", "/r:System.Core.dll", "/r:System.Drawing.dll", "/r:System.Windows.Forms.dll")
+          $refs = @("/r:System.dll", "/r:System.Core.dll", "/r:System.Drawing.dll", "/r:System.Windows.Forms.dll", "/r:System.Management.dll", "/r:System.Runtime.Serialization.dll", "/r:System.Xml.dll")
           & $csc /nologo /target:winexe /optimize+ "/out:$PWD\artifacts\setup.exe" $refs "src\Setup.cs"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
@@ -40,6 +40,20 @@ jobs:
         run: |
           & "$PWD\artifacts\Unlocker.exe" "[WARMUP]"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: CLI regression smoke checks
+        shell: pwsh
+        run: |
+          function Invoke-CliCheck([string[]]$arguments, [int]$expectedExitCode) {
+            $process = Start-Process -FilePath "$PWD\artifacts\Unlocker.exe" -ArgumentList $arguments -WindowStyle Hidden -Wait -PassThru
+            if ($process.ExitCode -ne $expectedExitCode) {
+              throw "CLI exit code $($process.ExitCode) did not match expected $expectedExitCode for $($arguments -join ' ')"
+            }
+          }
+          Invoke-CliCheck @("--version") 0
+          Invoke-CliCheck @("--help") 0
+          Invoke-CliCheck @("--json", "$PWD\README.md") 0
+          Invoke-CliCheck @("--unknown") 2
 
       - uses: actions/upload-artifact@v5
         with:
@@ -60,7 +74,7 @@ jobs:
           $csc = Join-Path $env:WINDIR "Microsoft.NET\Framework64\v4.0.30319\csc.exe"
           New-Item -ItemType Directory -Force -Path "artifacts\tests" | Out-Null
           $src = Get-ChildItem -LiteralPath "src" -Filter "*.cs" | Where-Object { $_.Name -ne "Setup.cs" }
-          $refs = @("/r:System.dll", "/r:System.Core.dll", "/r:System.Drawing.dll", "/r:System.Windows.Forms.dll")
+          $refs = @("/r:System.dll", "/r:System.Core.dll", "/r:System.Drawing.dll", "/r:System.Windows.Forms.dll", "/r:System.Management.dll", "/r:System.Runtime.Serialization.dll", "/r:System.Xml.dll")
           & $csc /nologo /target:library "/out:$PWD\artifacts\tests\UnBlock.Core.dll" $refs @($src.FullName)
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
@@ -76,7 +90,7 @@ jobs:
         shell: pwsh
         run: |
           $csc = Join-Path $env:WINDIR "Microsoft.NET\Framework64\v4.0.30319\csc.exe"
-          $refs = @("/r:System.dll", "/r:System.Core.dll", "/r:System.Drawing.dll", "/r:System.Windows.Forms.dll", "/r:$PWD\artifacts\tests\UnBlock.Core.dll", "/r:$PWD\artifacts\tests\UnBlock.Setup.dll")
+          $refs = @("/r:System.dll", "/r:System.Core.dll", "/r:System.Drawing.dll", "/r:System.Windows.Forms.dll", "/r:System.Management.dll", "/r:System.Runtime.Serialization.dll", "/r:System.Xml.dll", "/r:$PWD\artifacts\tests\UnBlock.Core.dll", "/r:$PWD\artifacts\tests\UnBlock.Setup.dll")
           & $csc /nologo /target:exe "/out:$PWD\artifacts\tests\CiTests.exe" $refs "tests\CiTests.cs"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & "$PWD\artifacts\tests\CiTests.exe" --repo "$PWD"
