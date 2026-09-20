@@ -6,7 +6,7 @@ using System.Windows.Forms;
 
 // Palette and metrics for the main window, defined once and shared by both themes.
 // A calm technical-tool look: neutral greys carry the window, one accent marks the primary
-// action, danger/success carry meaning only. Reasons for each choice live in DESIGN.md.
+// action, danger/success carry meaning only.
 internal sealed class UiTheme {
     internal enum Mode { Light, Dark }
 

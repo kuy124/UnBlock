@@ -992,8 +992,6 @@ internal static class CiTests {
         Check(File.ReadAllText(Path.Combine(repoRoot, "src", "UninstallEngine.cs")).Contains("UiLayout.LayoutButtonRow"), "dialog action buttons use the label-driven layout so they cannot clip");
         Check(form.Contains("LoadThemePreference") && form.Contains("SaveThemePreference") && form.Contains("BtnThemeToggle_Click") && ui.Contains("ApplyTheme"), "theme toggle is wired to persistence and repaint");
         Check(!ui.Contains("MakeActionButton") && !ui.Contains("Color.FromArgb(202, 111, 30)") && !ui.Contains("Color.FromArgb(95, 78, 121)") && !ui.Contains("Color.FromArgb(116, 80, 42)"), "old ad-hoc rainbow button fills are removed from the main window");
-        string design = File.Exists(Path.Combine(repoRoot, "DESIGN.md")) ? File.ReadAllText(Path.Combine(repoRoot, "DESIGN.md")) : "";
-        Check(design.Contains("ENERGY") && design.Contains("RHYTHM") && design.Contains("MOTION"), "DESIGN.md records the direction dials");
         string fileOps = File.ReadAllText(Path.Combine(repoRoot, "src", "FileOperations.cs"));
         Check(fileOps.Contains("FOFX_RECYCLEONDELETE") && fileOps.Contains("IFileOperation") && fileOps.Contains("SHQueryRecycleBin"), "recycle path uses IFileOperation with recycle-only flag and verifies the bin");
         Check(fileOps.Contains("IsRecycleBinAvailableFor") && fileOps.Contains("The item was left in place"), "recycle path refuses and preserves the item when no Recycle Bin exists");
